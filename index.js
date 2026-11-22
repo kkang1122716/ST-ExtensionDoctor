@@ -16,6 +16,9 @@ const DEFAULTS = {
     rateThreshold: 30,
     duration: 30,
     throttleMs: 200,
+    debounceMs: 300,
+    freezeAlert: true,
+    freezeMs: 1000,
     ai: { mode: 'current', profileId: '', profileModel: '', directUrl: '', directModel: '', rememberKey: false, maxTokens: 16000, timeoutSec: 180 },
     hotfixes: [],
 };
@@ -103,16 +106,20 @@ function ensureNames(owners) {
 function onProbeAlert(a) {
     const owners = a.type === 'pingpong' ? [a.a, a.b] : [a.owner];
     ensureNames(owners).then(() => {
-        const msg = a.type === 'pingpong'
-            ? `⚠️ 루프 의심: ${ownerLabel(a.a)} ↔ ${ownerLabel(a.b)} (초당 ${fmtN(a.perSec)}회)`
-            : `⚠️ 감시자 과다 호출: ${ownerLabel(a.owner)} — 대상 ${a.target} (초당 ${fmtN(a.perSec)}회)`;
+        let msg;
+        let canFix = true;
+        if (a.type === 'pingpong') msg = `⚠️ 루프 의심: ${ownerLabel(a.a)} ↔ ${ownerLabel(a.b)} (초당 ${fmtN(a.perSec)}회)`;
+        else if (a.type === 'freeze') {
+            msg = `⚠️ 화면 ${(a.freeze.duration / 1000).toFixed(1)}초 멈춤: ${ownerLabel(a.owner)} — ${freezeWhat(a.freeze)}`;
+            canFix = !!findDomRecsFor(a.owner, a.freeze.type, a.freeze.target).length;
+        } else msg = `⚠️ 감시자 과다 호출: ${ownerLabel(a.owner)} — 대상 ${a.target} (초당 ${fmtN(a.perSec)}회)`;
         console.warn('[ExtensionDoctor]', msg, a);
         lastAlerts.unshift({ ...a, msg, at: Date.now() });
         lastAlerts.length = Math.min(lastAlerts.length, 20);
         const html = `<div class="xdoc-toast"><div class="xdoc-toast-msg">${esc(msg)}</div>
             <div class="xdoc-toast-btns">
               <button type="button" class="menu_button" data-xdoc="view">진단 보기</button>
-              <button type="button" class="menu_button" data-xdoc="fix">임시 보정 적용하시겠습니까?</button>
+              ${canFix ? '<button type="button" class="menu_button" data-xdoc="fix">임시 보정 적용하시겠습니까?</button>' : ''}
             </div></div>`;
         const $t = toastr.warning(html, 'Extension Doctor', { timeOut: 20000, extendedTimeOut: 10000, escapeHtml: false, tapToDismiss: false, closeButton: true });
         $t?.on?.('click', 'button[data-xdoc]', ev => {
@@ -120,9 +127,38 @@ function onProbeAlert(a) {
             const act = ev.currentTarget.dataset.xdoc;
             toastr.clear($t);
             if (act === 'view') showQuickReport(a);
+            else if (a.type === 'freeze') offerDomHotfix({ owner: a.owner, type: a.freeze.type, target: a.freeze.target });
             else offerObserverHotfix(a);
         });
     });
+}
+
+const EVENT_KO = {
+    input: '글자 입력', beforeinput: '글자 입력', keydown: '키 누름', keyup: '키 뗌', keypress: '키 입력',
+    scroll: '스크롤', wheel: '마우스 휠', mousemove: '마우스 이동', pointermove: '포인터 이동', touchmove: '터치 이동',
+    resize: '창 크기 변경', selectionchange: '선택 변경', click: '클릭', pointerup: '클릭(뗌)', pointerdown: '클릭(누름)', change: '값 변경',
+};
+const eventKo = t => EVENT_KO[t] || t;
+
+function freezeWhat(f) {
+    if (f.type) return `${eventKo(f.type)} 반응${f.target ? ` (${f.target})` : ''}`;
+    if (f.kind === 'observer') return '화면 감시자';
+    if (f.kind === 'interval') return '반복 타이머';
+    if (f.kind === 'event') return 'ST 이벤트 처리';
+    if (f.kind === 'timer') return '타이머';
+    if (/TimerHandler:setInterval/.test(f.invoker)) return '반복 타이머';
+    if (/TimerHandler/.test(f.invoker)) return '타이머';
+    if (/FrameRequestCallback/.test(f.invoker)) return '화면 그리기 콜백';
+    if (/MutationObserver|MutationCallback/i.test(f.invoker)) return '화면 감시자';
+    return f.fn ? `${f.fn}()` : (f.invoker || '스크립트');
+}
+
+/** DOM listener records of an extension for an event type; prefers the exact target when given. */
+function findDomRecsFor(owner, type, target) {
+    if (!probe || !type) return [];
+    const all = probe.snapshot().dom.filter(d => d.owner === owner && d.type === type);
+    const exact = target ? all.filter(d => d.target === target || d.target.endsWith(`→ ${target}`)) : [];
+    return exact.length ? exact : all;
 }
 const lastAlerts = [];
 
@@ -469,10 +505,16 @@ function buildReport(start, end, extra = {}) {
     const ranking = [...rows.values()].filter(r => r.owner !== probe.SELF && (r.cpuMs + r.loafMs > 0.5 || r.obsCalls || r.dom || r.listeners || r.observers))
         .sort((a, b) => (b.cpuMs + b.loafMs) - (a.cpuMs + a.loafMs) || b.dom - a.dom).slice(0, 30);
 
+    const domHandlers = diffBy(start?.dom, end.dom || [], x => x.key).map(({ cur, prev }) => ({
+        ...cur, dCalls: cur.calls - (prev?.calls || 0), dMs: cur.totalMs - (prev?.totalMs || 0), dEvents: cur.events - (prev?.events || 0),
+    })).filter(d => d.owner !== probe.SELF && d.dEvents > 0).sort((a, b) => b.dMs - a.dMs).slice(0, 15);
+    const since = start?.at ?? 0;
+    const bigFreezes = (end.freezes || []).filter(f => f.at >= since && f.owner !== probe.SELF).sort((a, b) => b.duration - a.duration).slice(0, 10);
+
     return {
-        kind: extra.kind || 'diagnosis', durSec, stopped: !!extra.stopped, alert: extra.alert || null,
+        kind: extra.kind || 'diagnosis', durSec, stopped: !!extra.stopped, alert: extra.alert || null, at: Date.now(),
         ranking, loops, conflicts: findConflicts(end.observers, new Set(edgeDiff.filter(e => e.d > 0 && e.from !== e.to).map(e => [e.from, e.to].sort().join('|')))),
-        hotObservers, intervals, events: evs,
+        hotObservers, intervals, events: evs, domHandlers, bigFreezes, freezeWatch: !!end.freezeWatch,
         frames: extra.frames || null, dom: extra.dom || null, scan: extra.scan || null,
     };
 }
@@ -485,6 +527,9 @@ function allOwnersIn(report) {
     report.hotObservers.forEach(o => s.add(o.owner));
     report.intervals.forEach(o => s.add(o.owner));
     report.events.forEach(o => s.add(o.owner));
+    report.domHandlers?.forEach(o => s.add(o.owner));
+    report.bigFreezes?.forEach(o => s.add(o.owner));
+    report.compare?.exts.forEach(o => s.add(o.owner));
     report.dom?.panels.forEach(p => s.add(p.owner));
     report.frames?.top.forEach(f => s.add(f.owner));
     report.scan?.issues.forEach(i => s.add(i.ext));
@@ -501,6 +546,20 @@ function reportToText(r) {
     L.push(`[Extension Doctor 리포트] ${r.kind === 'diagnosis' ? `진단 ${r.durSec.toFixed(0)}초${r.stopped ? ' (중간 중지)' : ''}` : `페이지 로드 후 누적 ${r.durSec.toFixed(0)}초`}`);
     L.push(`ST ${ctx().getVersion?.()?.pkgVersion || ''} / ${navigator.userAgent.match(/(Chrome|Firefox|Safari)\/[\d.]+/)?.[0] || ''}`);
     if (r.alert) L.push(`\n경고: ${r.alert.msg || r.alert.type}`);
+    if (r.compare) {
+        const c = r.compare;
+        L.push(`\n## 지난 진단(${fmtDate(c.prev.at)})과 비교`);
+        for (const m of c.metrics) L.push(`- ${m.label}: ${fmtMetric(m, m.prev)} → ${fmtMetric(m, m.cur)} (${changeText(m.prev, m.cur)})`);
+        for (const e of c.exts) L.push(`- ${ownerLabel(e.owner)}: 초당 ${e.prev.toFixed(1)}ms → ${e.cur.toFixed(1)}ms${e.note ? ` (${e.note})` : ''}`);
+    }
+    if (r.domHandlers?.length) {
+        L.push('\n## 입력·스크롤 반응 코드 (확장이 단 것)');
+        for (const d of r.domHandlers) L.push(`- ${ownerLabel(d.owner)} ${eventKo(d.type)} @ ${d.target}: 이벤트 ${fmtN(d.dEvents)}회, 실행 ${fmtN(d.dCalls)}회, ${fmtMs(d.dMs)} (최대 ${fmtMs(d.maxMs)}) ${siteStr(d.site)}`);
+    }
+    if (!r.frames && r.bigFreezes?.length) {
+        L.push('\n## 최근 큰 멈춤');
+        for (const f of r.bigFreezes) L.push(`- ${fmtMs(f.duration)} — ${ownerLabel(f.owner)} ${freezeWhat(f)} ${shortFile(f.file)}`);
+    }
     L.push('\n## 확장별 순위 (CPU ms = 감시자/타이머/이벤트 콜백 실측, 멈춤 = 긴 프레임 귀속)');
     for (const x of r.ranking) L.push(`- ${ownerLabel(x.owner)}: CPU ${fmtMs(x.cpuMs)}, 멈춤 ${fmtMs(x.loafMs)}, 감시자 호출 ${fmtN(x.obsCalls)}회 (평균 ${x.obsCalls ? fmtMs(x.obsMs / x.obsCalls) : '-'}), 패널 DOM ${fmtN(x.dom)}, 리스너 ${x.listeners}/감시자 ${x.observers}/인터벌 ${x.intervals}`);
     L.push('\n## 루프 / 충돌');
@@ -550,6 +609,29 @@ function reportToHtml(r) {
         <button type="button" class="menu_button" data-xdoc="ai"><i class="fa-solid fa-robot"></i> AI 분석</button>
       </div></div>`);
     if (r.alert) parts.push(`<div class="xdoc-alert">${esc(r.alert.msg || '')}</div>`);
+    if (r.restored) parts.push('<div class="xdoc-muted">새로고침 전에 만든 리포트예요. 표의 [보정] 버튼은 지금 화면에 없는 대상일 수 있으니, 다시 진단한 뒤 써 주세요.</div>');
+
+    if (r.compare) {
+        const c = r.compare;
+        parts.push(`<h4>지난 진단과 비교 <span class="xdoc-muted">${esc(fmtDate(c.prev.at))} 진단 대비 · 초당 값으로 맞춰 비교</span></h4>`);
+        parts.push(table(['항목', '지난번', '이번', '변화'], c.metrics.map(m => [esc(m.label), fmtMetric(m, m.prev), fmtMetric(m, m.cur), changeHtml(m.prev, m.cur)])));
+        if (c.exts.length) {
+            parts.push(table(['확장 (CPU+멈춤, 초당)', '지난번', '이번', '변화'], c.exts.map(e => [esc(ownerLabel(e.owner)) + (e.note ? ` <span class="xdoc-muted">(${esc(e.note)})</span>` : ''),
+                `${e.prev.toFixed(1)}ms`, `${e.cur.toFixed(1)}ms`, changeHtml(e.prev, e.cur)])));
+        }
+    }
+
+    if (!r.frames && r.bigFreezes?.length) {
+        parts.push('<h4>최근 큰 멈춤 <span class="xdoc-muted">페이지를 연 뒤 0.2초 넘게 멈춘 순간</span></h4>');
+        parts.push(table(['길이', '확장', '무엇을 하다가', ''], r.bigFreezes.map((f, i) => [fmtMs(f.duration), esc(ownerLabel(f.owner)), esc(`${freezeWhat(f)} ${shortFile(f.file)}`),
+            f.type && probe.isExtOwner(f.owner) ? `<button type="button" class="menu_button xdoc-small" data-xdoc="fix-fz" data-i="${i}">보정</button>` : ''])));
+    }
+
+    if (r.domHandlers?.length) {
+        parts.push('<h4>입력·스크롤 반응 코드 <span class="xdoc-muted">확장이 글자 입력·스크롤·마우스 이동 등에 단 코드</span></h4>');
+        parts.push(table(['확장', '반응', '대상', '이벤트', '실행', '시간', '최대', ''], r.domHandlers.map((d, i) => [esc(ownerLabel(d.owner)), esc(eventKo(d.type)), esc(d.target),
+            fmtN(d.dEvents), fmtN(d.dCalls), fmtMs(d.dMs), fmtMs(d.maxMs), `<button type="button" class="menu_button xdoc-small" data-xdoc="fix-dom" data-i="${i}">보정</button>`])));
+    }
 
     parts.push('<h4>루프 / 충돌</h4>');
     parts.push(table(['종류', '확장', '내용', ''], [
@@ -609,6 +691,8 @@ async function showReport(r) {
         else if (act === 'fix-loop') { const l = r.loops[Number(b.dataset.i)]; offerObserverHotfix({ type: 'pingpong', a: l.a, b: l.b, observerIds: l.observerIds, perSec: Math.round(l.perSec) }); }
         else if (act === 'fix-obs') { const o = r.hotObservers.find(x => String(x.id) === b.dataset.id); if (o) offerObserverHotfix({ type: 'rate', owner: o.owner, observerId: o.id, target: o.targets[0]?.sel || '*' }); }
         else if (act === 'fix-ev') { const e = r.events[Number(b.dataset.i)]; if (e) offerEventHotfix(e); }
+        else if (act === 'fix-dom') { const d = r.domHandlers[Number(b.dataset.i)]; if (d) offerDomHotfix({ owner: d.owner, type: d.type, target: d.target }); }
+        else if (act === 'fix-fz') { const f = r.bigFreezes[Number(b.dataset.i)]; if (f) offerDomHotfix({ owner: f.owner, type: f.type, target: f.target }); }
     });
     new Popup(root, POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true, okButton: '닫기' }).show();
 }
@@ -617,6 +701,83 @@ async function showQuickReport(alert = null) {
     const list = await discoverExtensions();
     const r = buildReport(null, probe.snapshot(), { kind: 'cumulative', alert, dom: countDom(list.map(x => x.name)) });
     showReport(r);
+}
+
+// ------------------------------------------------------------------ history (this browser only) & comparison
+
+const HIST_KEY = 'extensionDoctor.history';
+const LAST_KEY = 'extensionDoctor.lastReport';
+const HIST_MAX = 10;
+
+function loadHistory() {
+    try { const v = JSON.parse(localStorage.getItem(HIST_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function storeHistory(list) {
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch { /* storage full or blocked */ }
+}
+function storeLastReport(r) {
+    try { localStorage.setItem(LAST_KEY, JSON.stringify(r, (k, v) => (k === 'el' ? undefined : v))); } catch { /* too big or blocked: keep in memory only */ }
+}
+function loadLastReport() {
+    try { const v = JSON.parse(localStorage.getItem(LAST_KEY) || 'null'); return v && Array.isArray(v.ranking) ? { ...v, restored: true } : null; } catch { return null; }
+}
+
+/** Compact, per-second numbers of a diagnosis so runs of different length can be compared. */
+function summarizeReport(r) {
+    const per = v => v / r.durSec;
+    const ext = {};
+    for (const x of r.ranking) if (probe.isExtOwner(x.owner)) ext[x.owner] = per(x.cpuMs + x.loafMs);
+    return {
+        at: r.at, durSec: r.durSec,
+        cpuPerSec: per(r.ranking.reduce((a, x) => a + x.cpuMs, 0)),
+        freezeMsPerMin: r.frames && r.frames.type !== 'none' ? per(r.frames.totalMs) * 60 : null,
+        freezePerMin: r.frames && r.frames.type !== 'none' ? per(r.frames.count) * 60 : null,
+        domTotal: r.dom?.total ?? null, iframes: r.dom?.iframes ?? null, loops: r.loops.length, ext,
+    };
+}
+
+function buildCompare(prev, cur) {
+    const metrics = [
+        { label: '확장 콜백 CPU (초당)', unit: 'msps', prev: prev.cpuPerSec, cur: cur.cpuPerSec },
+        { label: '멈춤 시간 (1분당)', unit: 'ms', prev: prev.freezeMsPerMin, cur: cur.freezeMsPerMin },
+        { label: '멈춤 횟수 (1분당)', unit: 'n1', prev: prev.freezePerMin, cur: cur.freezePerMin },
+        { label: '전체 화면 요소', unit: 'n', prev: prev.domTotal, cur: cur.domTotal },
+        { label: 'iframe', unit: 'n', prev: prev.iframes, cur: cur.iframes },
+        { label: '루프 의심', unit: 'n', prev: prev.loops, cur: cur.loops },
+    ].filter(m => m.prev != null && m.cur != null);
+    const owners = new Set([...Object.keys(prev.ext || {}), ...Object.keys(cur.ext || {})]);
+    const exts = [...owners].map(o => {
+        const p = prev.ext?.[o]; const c = cur.ext?.[o];
+        return { owner: o, prev: p ?? 0, cur: c ?? 0, note: p == null ? '이번에 새로 보임' : c == null ? '이번엔 안 보임 (꺼짐?)' : '' };
+    }).filter(e => e.note || Math.abs(e.cur - e.prev) >= 0.5)
+        .sort((a, b) => Math.abs(b.cur - b.prev) - Math.abs(a.cur - a.prev)).slice(0, 10);
+    return { prev: { at: prev.at }, metrics, exts };
+}
+
+function fmtMetric(m, v) {
+    if (v == null) return '-';
+    if (m.unit === 'msps') return `${v.toFixed(1)}ms`;
+    if (m.unit === 'ms') return fmtMs(v);
+    if (m.unit === 'n1') return `${v.toFixed(1)}회`;
+    return fmtN(Math.round(v));
+}
+const fmtDate = at => new Date(at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+function changeInfo(prev, cur) {
+    if (prev === cur) return { dir: 0, text: '변화 없음' };
+    if (!prev) return { dir: cur > 0 ? 1 : 0, text: cur > 0 ? '새로 생김' : '변화 없음' };
+    const pct = ((cur - prev) / prev) * 100;
+    if (Math.abs(pct) < 3) return { dir: 0, text: '거의 같음' };
+    return { dir: pct < 0 ? -1 : 1, text: `${pct < 0 ? '▼' : '▲'} ${Math.abs(pct).toFixed(0)}%` };
+}
+const changeText = (p, c) => changeInfo(p, c).text;
+function changeHtml(p, c) {
+    const i = changeInfo(p, c);
+    return `<span class="${i.dir < 0 ? 'xdoc-good' : i.dir > 0 ? 'xdoc-bad' : 'xdoc-muted'}">${esc(i.text)}</span>`;
+}
+
+function renderHistoryInfo() {
+    const n = loadHistory().length;
+    $('#xdoc_history_info').text(n ? `저장된 진단 기록 ${n}개 (이 브라우저에만 저장, 최근 ${HIST_MAX}개)` : '저장된 진단 기록이 없어요.');
 }
 
 // ------------------------------------------------------------------ diagnosis
@@ -650,7 +811,7 @@ function startDiagnosis(sec) {
         // Skip idle frames (background tab / hidden window stretch frames to ~1s with no script and no blocking).
         po = new PerformanceObserver(list => {
             for (const e of list.getEntries()) {
-                if (type === 'loaf' && !(e.blockingDuration > 0) && !e.scripts?.length) continue;
+                if (type === 'loaf' && probe.effectiveFreezeMs(e) < 50) continue;
                 frames.push(e);
             }
         });
@@ -669,18 +830,22 @@ function summarizeFrames(type, entries, t0) {
     const top = [];
     let totalMs = 0;
     for (const e of entries) {
-        totalMs += e.duration;
+        const felt = type === 'loaf' ? probe.effectiveFreezeMs(e) : e.duration;
+        totalMs += felt;
         let owner = 'unknown'; let script = '';
         if (type === 'loaf' && e.scripts?.length) {
+            // attributeScript matches the frame against probe timings, so wrapped (probe.js) and jQuery-dispatched
+            // handlers are credited to the extension that really ran.
             for (const s of e.scripts) {
-                const o = probe.ownerFromUrl(s.sourceURL) || (s.sourceURL ? 'core' : 'unknown');
+                const o = probe.attributeScript(s).owner;
                 owners.set(o, (owners.get(o) || 0) + s.duration);
             }
             const main = [...e.scripts].sort((a, b) => b.duration - a.duration)[0];
-            owner = probe.ownerFromUrl(main.sourceURL) || (main.sourceURL ? 'core' : 'unknown');
-            script = `${main.sourceFunctionName || main.invoker || ''} @ ${shortFile(main.sourceURL) || '?'}`;
+            const attr = probe.attributeScript(main);
+            owner = attr.owner;
+            script = attr.kind ? freezeWhat({ ...attr, invoker: main.invoker }) : `${main.sourceFunctionName || main.invoker || ''} @ ${shortFile(main.sourceURL) || '?'}`;
         }
-        top.push({ duration: e.duration, start: e.startTime - t0, owner, script });
+        top.push({ duration: felt, start: e.startTime - t0, owner, script });
     }
     top.sort((a, b) => b.duration - a.duration);
     return { type, count: entries.length, totalMs, top: top.slice(0, 10), owners: [...owners].map(([owner, ms]) => ({ owner, ms })) };
@@ -702,6 +867,13 @@ async function finishDiagnosis(stopped) {
         try { scan = await staticScan(); } catch (e) { console.error('[ExtensionDoctor] scan failed', e); }
         const frames = summarizeFrames(d.type, d.frames, d.start.at);
         const r = buildReport(d.start, end, { kind: 'diagnosis', stopped, frames, dom, scan });
+        const hist = loadHistory();
+        const cur = summarizeReport(r);
+        if (hist[0]) r.compare = buildCompare(hist[0], cur);
+        hist.unshift(cur);
+        storeHistory(hist);
+        storeLastReport(r);
+        renderHistoryInfo();
         lastReport = r;
         setLastButtons();
         await showReport(r);
@@ -722,13 +894,19 @@ const KIND_LABEL = {
     throttle: r => `호출 간격 제한 ${r.interval}ms (루프 시 최대 2초)`,
     ignorePartner: r => `상대(${(r.partners || []).map(ownerLabel).join(', ')}) 변경 무시`,
     pause: () => '감시자 일시정지',
-    skip: () => '이벤트 핸들러 건너뛰기',
+    skip: r => (r.scope === 'dom' ? '반응 코드 건너뛰기' : '이벤트 핸들러 건너뛰기'),
+    debounce: r => `멈춘 뒤 ${r.interval}ms에 한 번만 실행`,
 };
-const ruleLabel = r => `${ownerLabel(r.owner)} — ${r.scope === 'event' ? `이벤트 ${r.event}` : `감시 대상 ${r.target}`}: ${KIND_LABEL[r.kind]?.(r) || r.kind}`;
+function ruleTarget(r) {
+    if (r.scope === 'event') return `이벤트 ${r.event}`;
+    if (r.scope === 'dom') return `${eventKo(r.type)} 반응 ${r.target === '*' ? '(전체)' : r.target}`;
+    return `감시 대상 ${r.target}`;
+}
+const ruleLabel = r => `${ownerLabel(r.owner)} — ${ruleTarget(r)}: ${KIND_LABEL[r.kind]?.(r) || r.kind}`;
 const newId = () => `hf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
 function persistRules() {
-    settings().hotfixes = probe.rules.filter(r => r.persist).map(({ id, scope, kind, owner, target, event, interval, partners }) => ({ id, scope, kind, owner, target, event, interval, partners, persist: true }));
+    settings().hotfixes = probe.rules.filter(r => r.persist).map(({ id, scope, kind, owner, target, event, type, interval, partners }) => ({ id, scope, kind, owner, target, event, type, interval, partners, persist: true }));
     save();
     renderHotfixList();
 }
@@ -811,6 +989,48 @@ async function offerEventHotfix(e) {
     toastr.success('적용했어요.');
 }
 
+const KEY_TYPES = new Set(['keydown', 'keyup', 'keypress']);
+
+/** Hotfix for an extension's input/scroll/mouse handler (from a freeze alert or the report). */
+async function offerDomHotfix({ owner, type, target }) {
+    const recs = findDomRecsFor(owner, type, target);
+    if (!recs.length) { toastr.warning('보정할 반응 코드를 찾지 못했어요. 이 확장이 직접 단 코드가 아니거나(HTML 속성 등) 이미 사라졌을 수 있어요.'); return; }
+    await ensureNames([owner]);
+    const isKey = KEY_TYPES.has(type);
+    const s = settings();
+    const { Popup, POPUP_TYPE, POPUP_RESULT } = ctx();
+    const el = document.createElement('div');
+    el.className = 'xdoc-fix';
+    el.innerHTML = `
+      <h3>임시 보정 적용하시겠습니까?</h3>
+      <p><b>${esc(ownerLabel(owner))}</b>가 <b>${esc(eventKo(type))}</b>에 반응하는 코드가 무거워요.</p>
+      <div class="xdoc-muted">대상:</div>
+      <ul>${recs.map(r => `<li><code>${esc(r.target)}</code> — ${fmtN(r.calls)}회 실행, 총 ${fmtMs(r.totalMs)}, 최대 ${fmtMs(r.maxMs)}</li>`).join('')}</ul>
+      ${isKey ? '' : `<label class="radio_label"><input type="radio" name="xdoc_fix_kind" value="debounce" checked> <b>멈춘 뒤 한 번만 실행</b> (권장)</label>
+      <div class="xdoc-desc">${esc(eventKo(type))}이(가) 이어지는 동안은 실행하지 않고, 멈추고 <input type="number" class="text_pole xdoc-num" id="xdoc_fix_interval" min="50" max="3000" value="${s.debounceMs}">ms 뒤에 마지막 것으로 한 번만 실행해요.
+        예: 글자 칠 때마다 무거운 계산을 하던 확장이, 타자를 멈췄을 때 한 번만 계산해요. 부작용: 그 확장의 반응(미리보기, 자동 높이 조절 등)이 그만큼 늦게 따라와요.</div>`}
+      <label class="radio_label"><input type="radio" name="xdoc_fix_kind" value="skip" ${isKey ? 'checked' : ''}> <b>반응 코드 건너뛰기</b></label>
+      <div class="xdoc-desc xdoc-warn">⚠️ 그 확장이 ${esc(eventKo(type))}에 반응하는 기능이 멈춰요.${isKey ? ' 키 입력 반응은 엔터로 보내기 같은 기능일 수 있어서, 멈춘 뒤 실행 방식은 쓸 수 없어요.' : ''}</div>
+      <div class="xdoc-row">적용 범위:
+        <label class="radio_label"><input type="radio" name="xdoc_fix_scope" value="once" checked> 이번만 (새로고침하면 해제)</label>
+        <label class="radio_label"><input type="radio" name="xdoc_fix_scope" value="persist"> 기억하기 (다음에도 적용)</label></div>
+      <div class="xdoc-muted">다른 확장의 파일은 건드리지 않아요. 설정 패널의 "적용 중인 보정"에서 언제든 해제할 수 있어요.</div>`;
+    const res = await new Popup(el, POPUP_TYPE.CONFIRM, '', { okButton: '적용', cancelButton: '취소', wide: true, allowVerticalScrolling: true }).show();
+    if (res !== POPUP_RESULT.AFFIRMATIVE) return;
+    const kind = el.querySelector('input[name="xdoc_fix_kind"]:checked')?.value || (isKey ? 'skip' : 'debounce');
+    const persist = el.querySelector('input[name="xdoc_fix_scope"]:checked')?.value === 'persist';
+    const interval = clamp(Number(el.querySelector('#xdoc_fix_interval')?.value) || 300, 50, 3000);
+    let n = 0;
+    for (const r of recs) {
+        if (probe.rules.some(x => x.scope === 'dom' && x.owner === owner && x.type === type && x.target === r.target)) continue;
+        probe.addRule({ id: newId(), scope: 'dom', kind, owner, type, target: r.target, interval, persist });
+        n++;
+    }
+    if (kind === 'debounce') s.debounceMs = interval;
+    persistRules();
+    toastr.success(`보정 ${n}개를 적용했어요.${persist ? ' (기억됨)' : ' (새로고침하면 해제)'}`);
+}
+
 async function renderHotfixList() {
     const box = document.getElementById('xdoc_hotfix_list');
     if (!box || !probe) return;
@@ -862,6 +1082,7 @@ async function collectCode(r) {
     r.loops.forEach(l => { focus.add(l.a); focus.add(l.b); });
     r.ranking.slice(0, 3).forEach(x => probe.isExtOwner(x.owner) && focus.add(x.owner));
     r.scan?.issues.filter(i => i.severity !== 'low').forEach(i => focus.add(i.ext));
+    (r.domHandlers || []).filter(d => d.dMs >= 50).slice(0, 3).forEach(d => focus.add(d.owner));
     const loopIds = new Set(r.loops.flatMap(l => l.observerIds));
     const snap = probe.snapshot();
 
@@ -869,6 +1090,7 @@ async function collectCode(r) {
     for (const owner of [...focus].slice(0, 6)) {
         const sites = [];
         snap.observers.filter(o => o.owner === owner && o.site && (loopIds.has(o.id) || r.hotObservers.some(h => h.id === o.id))).forEach(o => sites.push({ ...o.site, why: `감시자 생성 (${o.targets.map(t => t.sel).join(', ')})` }));
+        (r.domHandlers || []).filter(d => d.owner === owner && d.site).forEach(d => sites.unshift({ ...d.site, why: `${eventKo(d.type)} 반응 코드 등록 (${d.target}), ${fmtMs(d.dMs)}` }));
         r.intervals.filter(i => i.owner === owner && i.site).forEach(i => sites.push({ ...i.site, why: `setInterval ${i.delay}ms` }));
         r.scan?.issues.filter(i => i.ext === owner).forEach(i => sites.push({ url: location.origin + i.file, line: i.line, col: 1, why: i.msg }));
         let budget = 150;
@@ -1137,6 +1359,10 @@ async function initPanel() {
     $('#xdoc_duration_val').text(`${s.duration}초`);
     $('#xdoc_loop').prop('checked', s.loopDetect);
     $('#xdoc_threshold').val(s.rateThreshold);
+    $('#xdoc_freeze').prop('checked', s.freezeAlert);
+    $('#xdoc_freeze_sec').val((s.freezeMs / 1000).toFixed(1));
+    if (!lastReport) lastReport = loadLastReport();
+    renderHistoryInfo();
     $(`input[name="xdoc_ai_mode"][value="${s.ai.mode}"]`).prop('checked', true);
     $('#xdoc_profile_model').val(s.ai.profileModel);
     $('#xdoc_direct_url').val(s.ai.directUrl);
@@ -1158,6 +1384,17 @@ async function initPanel() {
     $root.on('input', '#xdoc_duration', function () { s.duration = Number(this.value); $('#xdoc_duration_val').text(`${s.duration}초`); save(); });
     $root.on('change', '#xdoc_loop', function () { s.loopDetect = this.checked; probe.config.loopDetect = this.checked; save(); });
     $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 30, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });
+    $root.on('change', '#xdoc_freeze', function () { s.freezeAlert = this.checked; probe.config.freezeAlert = this.checked; save(); });
+    $root.on('change', '#xdoc_freeze_sec', function () {
+        const sec = clamp(Number(this.value) || 1, 0.3, 10);
+        this.value = sec.toFixed(1);
+        s.freezeMs = Math.round(sec * 1000); probe.config.freezeMs = s.freezeMs; save();
+    });
+    $root.on('click', '#xdoc_history_clear', () => {
+        try { localStorage.removeItem(HIST_KEY); localStorage.removeItem(LAST_KEY); } catch { /* blocked */ }
+        renderHistoryInfo();
+        toastr.info('진단 기록을 지웠어요.');
+    });
     $root.on('change', 'input[name="xdoc_ai_mode"]', function () { s.ai.mode = this.value; showAiMode(); save(); });
     $root.on('mousedown focus', '#xdoc_profile', function () {
         // Rebuild only if the profile list changed, so an open dropdown is not reset while the user picks.
@@ -1213,6 +1450,8 @@ if (probe) {
         const s = settings();
         probe.config.loopDetect = s.loopDetect;
         probe.config.rateThreshold = s.rateThreshold;
+        probe.config.freezeAlert = s.freezeAlert;
+        probe.config.freezeMs = s.freezeMs;
         if (!probe.rules.length && s.hotfixes.length) probe.setRules(s.hotfixes.map(r => ({ ...r, persist: true })));
         probe.wrapEventSource();
     } catch (e) { console.error('[ExtensionDoctor]', e); }

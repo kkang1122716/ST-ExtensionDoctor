@@ -145,7 +145,10 @@ function install() {
     const alertHandlers = [];
     const pendingAlerts = [];
 
-    const config = { loopDetect: true, rateThreshold: 30, pingPongMin: 3, sustainSec: 3, cooldownMs: 5 * 60 * 1000 };
+    const config = {
+        loopDetect: true, rateThreshold: 30, pingPongMin: 3, sustainSec: 3, cooldownMs: 5 * 60 * 1000,
+        freezeAlert: true, freezeMs: 1000, freezeQuietMs: 20000, // no freeze toasts during the first 20s (page load)
+    };
 
     // ---------------------------------------------------------------- hotfix rules
 
@@ -183,6 +186,36 @@ function install() {
         round.best = null; round.bestMs = 0;
     }
 
+    // Slow wrapped callbacks (>=20ms). Long-frame reports name the *file* of the entry function, which for
+    // wrapped callbacks is probe.js and for jQuery handlers is jquery — so frames are matched against these
+    // records by time to credit the extension that actually ran.
+    const longTasks = [];
+    function noteLongTask(owner, t0, dt, stat) {
+        longTasks.push({
+            owner, t0, dt,
+            kind: stat?.type ? 'dom' : stat?.event ? 'event' : stat?.delay !== undefined ? 'interval' : stat?.targets ? 'observer' : 'timer',
+            type: stat?.type || null, target: stat?.type ? stat.target : null,
+        });
+        if (longTasks.length > 200) longTasks.shift();
+    }
+    function attributeScript(s) {
+        if (!s) return { owner: UNKNOWN };
+        const start = s.startTime; const end = start + s.duration;
+        // Nested wrapped callbacks overlap (e.g. a timer that dispatches an event an extension handles):
+        // prefer extension-owned work, then the longest.
+        let best = null;
+        const better = (a, b) => (isExtOwner(a.owner) !== isExtOwner(b.owner) ? isExtOwner(a.owner) : a.dt > b.dt);
+        for (let i = longTasks.length - 1; i >= 0; i--) {
+            const t = longTasks[i];
+            if (t.t0 + t.dt < start - 50) break;
+            if (t.t0 >= start - 2 && t.t0 <= end && t.dt >= s.duration * 0.5 && (!best || better(t, best))) best = t;
+        }
+        if (best) return best;
+        const o = ownerFromUrl(s.sourceURL);
+        if (o === SELF) return { owner: UNKNOWN }; // a wrapper ran but its callback was fast: real owner unknown
+        return { owner: o || (s.sourceURL ? CORE : UNKNOWN) };
+    }
+
     function runTask(owner, stat, fn, thisArg, args, isObserver = false) {
         const prevCur = ctx.current;
         ctx.current = owner;
@@ -195,6 +228,7 @@ function install() {
             const dt = t1 - t0;
             const os = ownerStat(owner); os.cbMs += dt; os.cbCount++;
             if (stat) { stat.calls++; stat.totalMs += dt; stat.lastAt = t1; if (dt > stat.maxMs) stat.maxMs = dt; }
+            if (dt >= 20) noteLongTask(owner, t0, dt, stat);
             ctx.current = prevCur;
             if (isObserver) { if (dt > round.bestMs) { round.bestMs = dt; round.best = owner; } }
             else ctx.lastExit = t1;
@@ -208,7 +242,7 @@ function install() {
         if (node === document) return 'document';
         if (node === document.documentElement) return 'html';
         if (node === document.body) return 'body';
-        if (node.nodeType !== 1) return node.nodeName.toLowerCase();
+        if (node.nodeType !== 1) return String(node.nodeName || node.constructor?.name || '?').toLowerCase();
         if (node.id) return `#${node.id}`;
         const cls = [...node.classList].slice(0, 2).map(c => `.${c}`).join('');
         return node.tagName.toLowerCase() + cls;
@@ -295,14 +329,17 @@ function install() {
         observe(target, options) {
             const rec = this[REC];
             if (rec) {
-                const sel = describeTarget(target);
-                const subtree = !!options?.subtree;
-                let t = rec.targets.find(x => x.sel === sel);
-                if (!t) { t = { sel, subtree, ref: target ? new WeakRef(target) : null }; rec.targets.push(t); rec.ruleVer = -1; }
-                else { t.subtree = t.subtree || subtree; t.ref = target ? new WeakRef(target) : null; }
-                t.attributes = !!(options?.attributes || options?.attributeFilter);
-                t.childList = !!options?.childList;
-                rec.connected = true;
+                try {
+                    const sel = describeTarget(target);
+                    const subtree = !!options?.subtree;
+                    const ref = target && typeof target === 'object' ? new WeakRef(target) : null;
+                    let t = rec.targets.find(x => x.sel === sel);
+                    if (!t) { t = { sel, subtree, ref }; rec.targets.push(t); rec.ruleVer = -1; }
+                    else { t.subtree = t.subtree || subtree; t.ref = ref; }
+                    t.attributes = !!(options?.attributes || options?.attributeFilter);
+                    t.childList = !!options?.childList;
+                    rec.connected = true;
+                } catch { /* bookkeeping only; the real observe() below decides success or error */ }
             }
             return super.observe(target, options);
         }
@@ -385,12 +422,14 @@ function install() {
             if (this !== panelA && this !== panelB) {
                 if (!placeholders.has(this)) return fn.apply(this, arguments);
                 const result = fn.apply(this, arguments);
-                const prev = panelOwners.get(this);
-                if (!prev || !isExtOwner(prev)) { const o = insertOwner(); if (o !== CORE && o !== UNKNOWN) panelOwners.set(this, o); }
+                try {
+                    const prev = panelOwners.get(this);
+                    if (!prev || !isExtOwner(prev)) { const o = insertOwner(); if (o !== CORE && o !== UNKNOWN) panelOwners.set(this, o); }
+                } catch { /* attribution only */ }
                 return result;
             }
             const result = fn.apply(this, arguments);
-            tagPanelChildren(this, insertOwner());
+            try { tagPanelChildren(this, insertOwner()); } catch { /* attribution only */ }
             return result;
         };
     }
@@ -458,6 +497,197 @@ function install() {
         return true;
     }
 
+    // ---------------------------------------------------------------- DOM event listeners (high-frequency types only)
+    // Only listeners registered by extensions for event types that fire in bursts are wrapped. Everything else
+    // (clicks, ST core listeners, listener objects) passes straight through, so normal-time cost stays near zero.
+
+    const HOT_TYPES = new Set(['input', 'beforeinput', 'keydown', 'keyup', 'keypress', 'scroll', 'wheel', 'mousemove', 'pointermove', 'touchmove', 'resize', 'selectionchange']);
+    const domRecs = new Map(); // `${owner}|${type}|${target}` -> record
+    const domWrappers = new WeakMap(); // listener -> Map(`${type}|${capture}` -> WeakMap(target -> wrapper))
+    let inJqAdd = 0;
+
+    function domRec(owner, type, target, site) {
+        const key = `${owner}|${type}|${target}`;
+        let rec = domRecs.get(key);
+        if (!rec) {
+            rec = { key, owner, type, target, site, count: 0, calls: 0, totalMs: 0, maxMs: 0, lastAt: 0, events: 0, deferred: 0, skipped: 0, ruleVer: -1, rule: null };
+            domRecs.set(key, rec);
+            ownerStat(owner).listeners++;
+        }
+        return rec;
+    }
+
+    function domRule(rec) {
+        if (rec.ruleVer === rulesVer) return rec.rule;
+        rec.ruleVer = rulesVer;
+        rec.rule = rules.find(r => r.scope === 'dom' && r.owner === rec.owner && r.type === rec.type && (r.target === '*' || r.target === rec.target)) || null;
+        return rec.rule;
+    }
+
+    function domInvoke(rec, fn, thisArg, args) {
+        rec.events++;
+        const r = domRule(rec);
+        if (r) {
+            if (r.kind === 'skip') { rec.skipped++; return undefined; }
+            if (r.kind === 'debounce') {
+                // Run once after the burst ends, with the last event. Note: preventDefault() is too late by then.
+                rec.deferred++;
+                rec.pendingThis = thisArg; rec.pendingArgs = args;
+                if (rec.debounceTimer) orig.clearTimeout.call(window, rec.debounceTimer);
+                rec.debounceTimer = orig.setTimeout.call(window, () => {
+                    rec.debounceTimer = 0;
+                    const a = rec.pendingArgs; const t = rec.pendingThis;
+                    rec.pendingArgs = null; rec.pendingThis = null;
+                    runTask(rec.owner, rec, fn, t, a);
+                }, Math.max(16, Number(r.interval) || 300));
+                return undefined;
+            }
+        }
+        return runTask(rec.owner, rec, fn, thisArg, args);
+    }
+
+    function describeEventTarget(t) {
+        try {
+            if (t === window) return 'window';
+            if (t instanceof Node) return describeTarget(t);
+            return String(t?.constructor?.name || 'object'); // e.g. VisualViewport, XMLHttpRequest
+        } catch { return '?'; }
+    }
+
+    const origAddEL = EventTarget.prototype.addEventListener;
+    const origRemoveEL = EventTarget.prototype.removeEventListener;
+    const captureOf = o => (typeof o === 'boolean' ? o : !!o?.capture);
+
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+        if (inJqAdd || typeof listener !== 'function' || !HOT_TYPES.has(type)) return origAddEL.call(this, type, listener, options);
+        let w = null;
+        try {
+            const { owner, site } = ownerForNewTask();
+            if (isExtOwner(owner)) {
+                const k = `${type}|${captureOf(options)}`;
+                let m = domWrappers.get(listener);
+                if (!m) { m = new Map(); domWrappers.set(listener, m); }
+                let byTarget = m.get(k);
+                if (!byTarget) { byTarget = new WeakMap(); m.set(k, byTarget); }
+                w = byTarget.get(this);
+                if (!w) {
+                    const rec = domRec(owner, type, describeEventTarget(this), site);
+                    rec.count++;
+                    w = function () { return domInvoke(rec, listener, this, arguments); };
+                    byTarget.set(this, w);
+                }
+            }
+        } catch (e) {
+            // Instrumentation must never break the caller: fall back to the plain listener.
+            w = null;
+            console.debug('[ExtensionDoctor] listener wrap skipped', e);
+        }
+        return origAddEL.call(this, type, w || listener, options);
+    };
+
+    EventTarget.prototype.removeEventListener = function (type, listener, options) {
+        if (typeof listener === 'function' && HOT_TYPES.has(type)) {
+            let w = null;
+            try { w = domWrappers.get(listener)?.get(`${type}|${captureOf(options)}`)?.get(this) || null; } catch { w = null; }
+            if (w) return origRemoveEL.call(this, type, w, options);
+        }
+        return origRemoveEL.call(this, type, listener, options);
+    };
+
+    // jQuery: one native handler per element/type is shared by every .on() handler, so attribution must
+    // happen at jQuery.event.add. The wrapper keeps the handler's guid so .off(fn) still finds it.
+    function patchJquery() {
+        const jq = window.jQuery;
+        if (!jq?.event?.add || jq.event.add.__doctor) return;
+        const origJqAdd = jq.event.add;
+        const patched = function (elem, types, handler, data, selector) {
+            inJqAdd++;
+            try {
+                if (typeof handler !== 'function' || typeof types !== 'string') return origJqAdd.apply(this, arguments);
+                let w = null;
+                try {
+                    const names = types.split(/\s+/).map(t => t.split('.')[0]).filter(Boolean);
+                    if (names.some(t => HOT_TYPES.has(t))) {
+                        const { owner, site } = ownerForNewTask();
+                        if (isExtOwner(owner)) {
+                            const target = selector ? `${describeEventTarget(elem)} → ${selector}` : describeEventTarget(elem);
+                            for (const t of names) if (HOT_TYPES.has(t)) domRec(owner, t, target, site).count++;
+                            w = function (ev) {
+                                const t = ev?.type;
+                                if (!HOT_TYPES.has(t)) return handler.apply(this, arguments);
+                                return domInvoke(domRec(owner, t, target, site), handler, this, arguments);
+                            };
+                            if (!handler.guid) handler.guid = jq.guid++;
+                            w.guid = handler.guid;
+                        }
+                    }
+                } catch (e) {
+                    w = null; // never break jQuery: register the original handler
+                    console.debug('[ExtensionDoctor] jQuery wrap skipped', e);
+                }
+                if (!w) return origJqAdd.apply(this, arguments);
+                return origJqAdd.call(this, elem, types, w, data, selector);
+            } finally {
+                inJqAdd--;
+            }
+        };
+        patched.__doctor = true;
+        jq.event.add = patched;
+    }
+
+    // ---------------------------------------------------------------- freeze watch (always on, near-zero cost)
+    // The browser itself reports frames longer than 50ms; we only look at them. Nothing runs while the UI is smooth.
+
+    const freezes = []; // most recent notable freezes (ring)
+    const installedAt = now();
+    const INVOKER_RE = /^(.*)\.on([a-z]+)$/;
+
+    function effectiveFreezeMs(e) {
+        let longest = 0;
+        for (const s of e.scripts || []) if (s.duration > longest) longest = s.duration;
+        return Math.max(e.blockingDuration || 0, longest);
+    }
+
+    function onLongFrame(e) {
+        const scripts = e.scripts || [];
+        let main = null;
+        for (const s of scripts) if (!main || s.duration > main.duration) main = s;
+        // Felt freeze = blocking time (or the longest single script). Frame length alone is inflated in
+        // background/hidden tabs, where frames stretch to ~1s while almost nothing runs.
+        const felt = effectiveFreezeMs(e);
+        if (felt < 200) return;
+        const attr = attributeScript(main);
+        const owner = attr.owner;
+        let type = attr.type || null; let target = attr.target || null;
+        if (!type && main?.invokerType === 'event-listener') {
+            const m = INVOKER_RE.exec(main.invoker || '');
+            if (m) {
+                type = m[2];
+                const idm = /#([\w-]+)/.exec(m[1]);
+                target = idm ? `#${idm[1]}` : m[1].toLowerCase();
+            }
+        }
+        const f = {
+            at: e.startTime, duration: felt, frameMs: e.duration, blocking: e.blockingDuration || 0, owner, kind: attr.kind || null,
+            invoker: main?.invoker || '', invokerType: main?.invokerType || '', fn: main?.sourceFunctionName || '',
+            file: main?.sourceURL || '', scriptMs: main?.duration || 0, type, target,
+        };
+        freezes.push(f);
+        if (freezes.length > 60) freezes.shift();
+        if (!config.freezeAlert || owner === SELF || !isExtOwner(owner)) return;
+        if (felt < config.freezeMs || now() - installedAt < config.freezeQuietMs) return;
+        emitAlert({ type: 'freeze', key: `fz:${owner}:${f.invoker}`, owner, freeze: f });
+    }
+
+    function startFreezeWatch() {
+        try {
+            if (!PerformanceObserver.supportedEntryTypes?.includes('long-animation-frame')) return false;
+            const po = new PerformanceObserver(list => { for (const e of list.getEntries()) onLongFrame(e); });
+            po.observe({ type: 'long-animation-frame', buffered: false });
+            return true;
+        } catch { return false; }
+    }
+
     // ---------------------------------------------------------------- detector
 
     const alerted = new Map();
@@ -520,6 +750,9 @@ function install() {
             intervals: [...intervals.values()].map(r => ({ ...r })),
             events: [...events.values()].map(r => ({ owner: r.owner, event: r.event, site: r.site, count: r.count, calls: r.calls, totalMs: r.totalMs, maxMs: r.maxMs, skipped: r.skipped })),
             edges: [...edges.values()].map(e => ({ from: e.from, to: e.to, count: e.count, obs: [...e.obs] })),
+            dom: [...domRecs.values()].map(r => ({ key: r.key, owner: r.owner, type: r.type, target: r.target, site: r.site, count: r.count, calls: r.calls, totalMs: r.totalMs, maxMs: r.maxMs, events: r.events, deferred: r.deferred, skipped: r.skipped })),
+            freezes: freezes.map(f => ({ ...f })),
+            freezeWatch,
         };
     }
 
@@ -538,6 +771,8 @@ function install() {
     wrapInsert(Element.prototype, 'insertAdjacentHTML');
     wrapInsert(Element.prototype, 'insertAdjacentElement');
     wrapEventSource();
+    patchJquery();
+    const freezeWatch = startFreezeWatch();
 
     // Remembered hotfix rules from extension settings (already loaded by ST before extensions activate).
     try {
@@ -546,6 +781,8 @@ function install() {
             if (Array.isArray(saved.hotfixes)) setRules(saved.hotfixes.map(r => ({ ...r, persist: true })));
             if (typeof saved.loopDetect === 'boolean') config.loopDetect = saved.loopDetect;
             if (Number(saved.rateThreshold) > 0) config.rateThreshold = Number(saved.rateThreshold);
+            if (typeof saved.freezeAlert === 'boolean') config.freezeAlert = saved.freezeAlert;
+            if (Number(saved.freezeMs) > 0) config.freezeMs = Number(saved.freezeMs);
         }
     } catch { /* settings not available yet: index.js will apply them */ }
 
@@ -553,7 +790,7 @@ function install() {
 
     return {
         SELF, SELF_FOLDER, CORE, UNKNOWN, orig, config, ctx,
-        ownerFromUrl, isExtOwner, snapshot, panelOwners,
+        ownerFromUrl, isExtOwner, snapshot, panelOwners, HOT_TYPES, attributeScript, effectiveFreezeMs,
         get rules() { return rules.slice(); }, setRules, addRule, removeRule,
         onAlert(h) { alertHandlers.push(h); while (pendingAlerts.length) { try { h(pendingAlerts.shift()); } catch (e) { console.error(e); } } },
         wrapEventSource,

@@ -19,6 +19,10 @@
                 <label for="xdoc_duration">진단 시간: <span id="xdoc_duration_val">30초</span></label>
                 <input type="range" id="xdoc_duration" min="10" max="60" step="5" value="30">
                 <div id="xdoc_status" class="xdoc-muted"></div>
+                <div class="xdoc-row">
+                    <small id="xdoc_history_info" class="xdoc-muted"></small>
+                    <button type="button" id="xdoc_history_clear" class="menu_button xdoc-small" title="이 브라우저에 저장된 진단 기록과 마지막 리포트를 지워요">기록 지우기</button>
+                </div>
                 <small class="xdoc-muted">채팅창에 <code>/doctor</code>를 입력해도 진단이 시작돼요.</small>
             </div>
 
@@ -27,6 +31,10 @@
                 <label class="checkbox_label"><input type="checkbox" id="xdoc_loop"> 켜기 (두 확장이 서로 다시 그리는 루프를 자동으로 알려줘요)</label>
                 <label for="xdoc_threshold">감시자 1개가 3초 넘게 초당 이 횟수보다 많이 불리면 경고</label>
                 <input type="number" id="xdoc_threshold" class="text_pole" min="5" max="1000" value="30">
+                <label class="checkbox_label"><input type="checkbox" id="xdoc_freeze"> 큰 멈춤 알림 (화면이 오래 멈추면 어느 확장 때문인지 바로 알려줘요)</label>
+                <label for="xdoc_freeze_sec">이 시간(초)보다 오래 멈추면 알림</label>
+                <input type="number" id="xdoc_freeze_sec" class="text_pole" min="0.3" max="10" step="0.1" value="1">
+                <small class="xdoc-muted">Chrome·Edge에서만 동작해요. 페이지를 연 직후 20초는 로딩 때문에 알리지 않아요.</small>
             </div>
 
             <div class="xdoc-section">
