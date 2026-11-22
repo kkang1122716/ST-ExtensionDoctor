@@ -28,6 +28,7 @@ function install() {
         prepend: Element.prototype.prepend,
         insertAdjacentHTML: Element.prototype.insertAdjacentHTML,
         insertAdjacentElement: Element.prototype.insertAdjacentElement,
+        fetch: window.fetch,
     };
     const now = () => performance.now();
 
@@ -635,6 +636,93 @@ function install() {
         jq.event.add = patched;
     }
 
+    // ---------------------------------------------------------------- API request origin (for error toasts)
+
+    // Deep stack walk incl. V8 async frames ("at async fn"), so an `await generateRaw()` from an extension
+    // still shows the extension even though the toast is raised inside ST's openai.js after the await.
+    // Returns { owner, site, direct } — direct = owner of the very first frame (who called the API itself).
+    function resolveDeep(above) {
+        if (!hasCallSites) return { ...resolveSite(), direct: null };
+        const prevPrep = Error.prepareStackTrace; const prevLimit = Error.stackTraceLimit;
+        let frames;
+        try {
+            Error.prepareStackTrace = toCallSites; Error.stackTraceLimit = 80;
+            const holder = {};
+            Error.captureStackTrace(holder, above || resolveDeep);
+            frames = holder.stack;
+        } finally { Error.prepareStackTrace = prevPrep; Error.stackTraceLimit = prevLimit; }
+        if (!Array.isArray(frames)) return { owner: UNKNOWN, site: null, direct: null };
+        let sawOrigin = false; let direct;
+        for (const f of frames) {
+            const url = f.getFileName?.() || f.getScriptNameOrSourceURL?.();
+            if (!url) continue;
+            if (url.endsWith('/probe.js') && url.includes(`/${SELF_FOLDER}/`)) continue;
+            sawOrigin = sawOrigin || url.startsWith(location.origin);
+            const owner = ownerFromUrl(url);
+            if (direct === undefined) direct = owner || CORE;
+            if (owner) return { owner, site: { url, line: f.getLineNumber?.() || 0, col: f.getColumnNumber?.() || 0 }, direct };
+        }
+        return { owner: sawOrigin ? CORE : UNKNOWN, site: null, direct: direct ?? null };
+    }
+
+    // Requests that talk to an AI / external service. Cross-origin requests count too (extensions calling APIs directly).
+    const RE_API = /\/api\/(backends|openai|sd|novelai|horde|translate|speech|google|azure|minimax|caption|vector|extra|search|backend)/i;
+    function isApiUrl(url) {
+        if (!url) return false;
+        if (RE_API.test(url)) return true;
+        return /^https?:\/\//i.test(url) && !url.startsWith(location.origin);
+    }
+    const apiCalls = []; // ring of recent API requests: { owner, site, url, t0, t1, status, ok }
+    const shortUrl = u => { try { const x = new URL(u, location.href); return x.origin === location.origin ? x.pathname : `${x.host}${x.pathname}`; } catch { return String(u).slice(0, 80); } };
+
+    if (typeof orig.fetch === 'function') {
+        window.fetch = function wrappedFetch(input, init) {
+            let rec = null;
+            try {
+                const url = typeof input === 'string' ? input : (input?.url || String(input));
+                if (isApiUrl(url)) {
+                    const c = ctx.current;
+                    const r = (isExtOwner(c) || c === SELF) ? { owner: c, site: null } : resolveDeep(wrappedFetch);
+                    rec = { owner: r.owner, site: r.site, url: shortUrl(url), t0: now(), t1: 0, status: 0, ok: null };
+                    apiCalls.push(rec);
+                    if (apiCalls.length > 30) apiCalls.shift();
+                }
+            } catch { rec = null; }
+            const p = orig.fetch.apply(window, arguments);
+            if (rec) {
+                try { p.then(res => { rec.t1 = now(); rec.status = res.status; rec.ok = res.ok; }, () => { rec.t1 = now(); rec.ok = false; }); } catch { /* ignore */ }
+            }
+            return p;
+        };
+    }
+
+    /**
+     * Who is behind a toast being shown right now? `above` = the toast wrapper (its frames are cut off).
+     * how: 'stack' (seen on the call stack, reliable) | 'ctx' (inside an extension callback) | 'api' (matched to a
+     * recent failing/finished API request — a best guess). Returns null for Doctor's own toasts.
+     */
+    function toastSource(above) {
+        const r = resolveDeep(above);
+        if (r.direct === SELF) return null;
+        if (r.owner !== CORE && r.owner !== UNKNOWN) return { owner: r.owner, site: r.site, how: 'stack', api: lastApiBy(r.owner) };
+        const c = ctx.current;
+        if (isExtOwner(c)) return { owner: c, site: null, how: 'ctx', api: lastApiBy(c) };
+        const t = now();
+        let best = null;
+        for (let i = apiCalls.length - 1; i >= 0; i--) {
+            const a = apiCalls[i];
+            if (!a.t1 || t - a.t1 > 4000) continue;
+            if (!best || (a.ok === false && best.ok !== false)) best = a;
+            if (best.ok === false) break;
+        }
+        if (best && best.owner !== CORE && best.owner !== UNKNOWN) return { owner: best.owner, site: best.site, how: 'api', api: { ...best } };
+        return { owner: r.owner, site: null, how: 'stack', api: best ? { ...best } : null };
+    }
+    function lastApiBy(owner) {
+        for (let i = apiCalls.length - 1; i >= 0; i--) if (apiCalls[i].owner === owner && now() - (apiCalls[i].t1 || now()) < 10000) return { ...apiCalls[i] };
+        return null;
+    }
+
     // ---------------------------------------------------------------- freeze watch (always on, near-zero cost)
     // The browser itself reports frames longer than 50ms; we only look at them. Nothing runs while the UI is smooth.
 
@@ -790,7 +878,8 @@ function install() {
 
     return {
         SELF, SELF_FOLDER, CORE, UNKNOWN, orig, config, ctx,
-        ownerFromUrl, isExtOwner, snapshot, panelOwners, HOT_TYPES, attributeScript, effectiveFreezeMs,
+        ownerFromUrl, isExtOwner, snapshot, panelOwners, HOT_TYPES, attributeScript, effectiveFreezeMs, toastSource,
+        recentApiCalls: () => apiCalls.map(a => ({ ...a })),
         get rules() { return rules.slice(); }, setRules, addRule, removeRule,
         onAlert(h) { alertHandlers.push(h); while (pendingAlerts.length) { try { h(pendingAlerts.shift()); } catch (e) { console.error(e); } } },
         wrapEventSource,

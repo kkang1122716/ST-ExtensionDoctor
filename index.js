@@ -19,6 +19,7 @@ const DEFAULTS = {
     debounceMs: 300,
     freezeAlert: true,
     freezeMs: 1000,
+    toastSource: true,
     ai: { mode: 'current', profileId: '', profileModel: '', directUrl: '', directModel: '', rememberKey: false, maxTokens: 16000, timeoutSec: 180 },
     hotfixes: [],
 };
@@ -161,6 +162,64 @@ function findDomRecsFor(owner, type, target) {
     return exact.length ? exact : all;
 }
 const lastAlerts = [];
+
+// ------------------------------------------------------------------ error toast origin ("보낸 곳")
+
+const toastLog = []; // recent error/warning toasts with their origin (this page session only)
+const TOAST_LOG_MAX = 20;
+let toastSourceOn = true;
+
+function toastOriginLabel(src) {
+    if (src.owner === 'core') return 'ST 본체 (채팅 생성 등 ST 자체 기능)';
+    if (src.owner === 'unknown' || !src.owner) return '알 수 없음';
+    return ownerLabel(src.owner);
+}
+
+function toastOriginHtml(src) {
+    const guess = src.how === 'api' ? ' <span class="xdoc-muted">(추정: 직전 API 요청 기준)</span>' : '';
+    const a = src.api;
+    const api = a ? `<div class="xdoc-toast-src-sub">${esc(a.url)}${a.status ? ` · ${a.status}` : a.ok === false ? ' · 연결 실패' : ''}</div>` : '';
+    return `📍 보낸 곳: <b>${esc(toastOriginLabel(src))}</b>${guess}${api}`;
+}
+
+function tagToast($t, src) {
+    const el = $t?.[0] || $t;
+    if (!el || typeof el.appendChild !== 'function') return;
+    const div = document.createElement('div');
+    div.className = 'xdoc-toast-src';
+    div.innerHTML = toastOriginHtml(src);
+    (el.querySelector('.toast-message') || el).appendChild(div);
+    if (probe.isExtOwner(src.owner) && !nameCache.has(src.owner)) ensureNames([src.owner]).then(() => { div.innerHTML = toastOriginHtml(src); });
+}
+
+const stripText = v => String(v ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+
+/** Wrap toastr.error/warning so every error toast says which extension (or ST itself) caused it. */
+function patchToasts() {
+    const tr = window.toastr;
+    if (!tr || tr.__xdocPatched || typeof probe?.toastSource !== 'function') return;
+    for (const kind of ['error', 'warning']) {
+        const original = tr[kind];
+        if (typeof original !== 'function') continue;
+        const wrapped = function (message, title) {
+            let src = null;
+            if (toastSourceOn) { try { src = probe.toastSource(wrapped); } catch { src = null; } }
+            const $t = original.apply(this, arguments);
+            if (src) {
+                try {
+                    tagToast($t, src);
+                    toastLog.unshift({ at: Date.now(), kind, title: stripText(title), msg: stripText(message), owner: src.owner, how: src.how, site: src.site,
+                        api: src.api ? { url: src.api.url, status: src.api.status, ok: src.api.ok } : null });
+                    if (toastLog.length > TOAST_LOG_MAX) toastLog.length = TOAST_LOG_MAX;
+                    console.info('[ExtensionDoctor] 알림 보낸 곳:', toastOriginLabel(src), src.site ? `${src.site.url}:${src.site.line}` : '', src.api?.url || '');
+                } catch { /* never break a toast */ }
+            }
+            return $t;
+        };
+        tr[kind] = wrapped;
+    }
+    tr.__xdocPatched = true;
+}
 
 // ------------------------------------------------------------------ DOM counting
 
@@ -515,6 +574,7 @@ function buildReport(start, end, extra = {}) {
         kind: extra.kind || 'diagnosis', durSec, stopped: !!extra.stopped, alert: extra.alert || null, at: Date.now(),
         ranking, loops, conflicts: findConflicts(end.observers, new Set(edgeDiff.filter(e => e.d > 0 && e.from !== e.to).map(e => [e.from, e.to].sort().join('|')))),
         hotObservers, intervals, events: evs, domHandlers, bigFreezes, freezeWatch: !!end.freezeWatch,
+        toasts: toastLog.slice(0, 10),
         frames: extra.frames || null, dom: extra.dom || null, scan: extra.scan || null,
     };
 }
@@ -528,6 +588,7 @@ function allOwnersIn(report) {
     report.intervals.forEach(o => s.add(o.owner));
     report.events.forEach(o => s.add(o.owner));
     report.domHandlers?.forEach(o => s.add(o.owner));
+    report.toasts?.forEach(o => s.add(o.owner));
     report.bigFreezes?.forEach(o => s.add(o.owner));
     report.compare?.exts.forEach(o => s.add(o.owner));
     report.dom?.panels.forEach(p => s.add(p.owner));
@@ -555,6 +616,12 @@ function reportToText(r) {
     if (r.domHandlers?.length) {
         L.push('\n## 입력·스크롤 반응 코드 (확장이 단 것)');
         for (const d of r.domHandlers) L.push(`- ${ownerLabel(d.owner)} ${eventKo(d.type)} @ ${d.target}: 이벤트 ${fmtN(d.dEvents)}회, 실행 ${fmtN(d.dCalls)}회, ${fmtMs(d.dMs)} (최대 ${fmtMs(d.maxMs)}) ${siteStr(d.site)}`);
+    }
+    if (r.toasts?.length) {
+        L.push('\n## 최근 오류 알림과 보낸 곳');
+        for (const t of r.toasts) {
+            L.push(`- ${fmtDate(t.at)} ${t.title ? `[${t.title}] ` : ''}${t.msg} → ${toastOriginLabel(t)}${t.how === 'api' ? ' (추정)' : ''}${t.api ? ` ${t.api.url}${t.api.status ? ` ${t.api.status}` : ''}` : ''} ${siteStr(t.site)}`);
+        }
     }
     if (!r.frames && r.bigFreezes?.length) {
         L.push('\n## 최근 큰 멈춤');
@@ -619,6 +686,13 @@ function reportToHtml(r) {
             parts.push(table(['확장 (CPU+멈춤, 초당)', '지난번', '이번', '변화'], c.exts.map(e => [esc(ownerLabel(e.owner)) + (e.note ? ` <span class="xdoc-muted">(${esc(e.note)})</span>` : ''),
                 `${e.prev.toFixed(1)}ms`, `${e.cur.toFixed(1)}ms`, changeHtml(e.prev, e.cur)])));
         }
+    }
+
+    if (r.toasts?.length) {
+        parts.push('<h4>최근 오류 알림과 보낸 곳 <span class="xdoc-muted">이 페이지를 연 뒤 뜬 빨간·노란 알림</span></h4>');
+        parts.push(table(['언제', '알림', '보낸 곳', '요청'], r.toasts.map(t => [esc(fmtDate(t.at)), esc(`${t.title ? `[${t.title}] ` : ''}${t.msg}`),
+            `<b>${esc(toastOriginLabel(t))}</b>${t.how === 'api' ? ' <span class="xdoc-muted">(추정)</span>' : ''}${t.site ? `<br><span class="xdoc-muted">${esc(siteStr(t.site))}</span>` : ''}`,
+            t.api ? esc(`${t.api.url}${t.api.status ? ` · ${t.api.status}` : ''}`) : ''])));
     }
 
     if (!r.frames && r.bigFreezes?.length) {
@@ -1360,6 +1434,7 @@ async function initPanel() {
     $('#xdoc_loop').prop('checked', s.loopDetect);
     $('#xdoc_threshold').val(s.rateThreshold);
     $('#xdoc_freeze').prop('checked', s.freezeAlert);
+    $('#xdoc_toastsrc').prop('checked', s.toastSource);
     $('#xdoc_freeze_sec').val((s.freezeMs / 1000).toFixed(1));
     if (!lastReport) lastReport = loadLastReport();
     renderHistoryInfo();
@@ -1384,6 +1459,7 @@ async function initPanel() {
     $root.on('input', '#xdoc_duration', function () { s.duration = Number(this.value); $('#xdoc_duration_val').text(`${s.duration}초`); save(); });
     $root.on('change', '#xdoc_loop', function () { s.loopDetect = this.checked; probe.config.loopDetect = this.checked; save(); });
     $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 30, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });
+    $root.on('change', '#xdoc_toastsrc', function () { s.toastSource = this.checked; toastSourceOn = this.checked; save(); });
     $root.on('change', '#xdoc_freeze', function () { s.freezeAlert = this.checked; probe.config.freezeAlert = this.checked; save(); });
     $root.on('change', '#xdoc_freeze_sec', function () {
         const sec = clamp(Number(this.value) || 1, 0.3, 10);
@@ -1452,6 +1528,8 @@ if (probe) {
         probe.config.rateThreshold = s.rateThreshold;
         probe.config.freezeAlert = s.freezeAlert;
         probe.config.freezeMs = s.freezeMs;
+        toastSourceOn = s.toastSource !== false;
+        patchToasts();
         if (!probe.rules.length && s.hotfixes.length) probe.setRules(s.hotfixes.map(r => ({ ...r, persist: true })));
         probe.wrapEventSource();
     } catch (e) { console.error('[ExtensionDoctor]', e); }

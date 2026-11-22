@@ -52,3 +52,8 @@
 .xdoc-ai-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .xdoc-ai-md pre { position: relative; overflow-x: auto; }
 .xdoc-copy-code { float: right; font-size: 0.8em; padding: 2px 8px !important; margin: 4px 0 -4px !important; }
+
+/* "보낸 곳" line appended to error toasts */
+.xdoc-toast-src { margin-top: 6px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.35); font-size: 0.9em; word-break: keep-all; }
+.xdoc-toast-src .xdoc-muted { opacity: 0.8; }
+.xdoc-toast-src-sub { font-size: 0.85em; opacity: 0.8; word-break: break-all; }
