@@ -641,7 +641,7 @@ function install() {
     // Deep stack walk incl. V8 async frames ("at async fn"), so an `await generateRaw()` from an extension
     // still shows the extension even though the toast is raised inside ST's openai.js after the await.
     // Returns { owner, site, direct } — direct = owner of the very first frame (who called the API itself).
-    function resolveDeep(above) {
+    function resolveDeep(above, collect = false) {
         if (!hasCallSites) return { ...resolveSite(), direct: null };
         const prevPrep = Error.prepareStackTrace; const prevLimit = Error.stackTraceLimit;
         let frames;
@@ -652,17 +652,28 @@ function install() {
             frames = holder.stack;
         } finally { Error.prepareStackTrace = prevPrep; Error.stackTraceLimit = prevLimit; }
         if (!Array.isArray(frames)) return { owner: UNKNOWN, site: null, direct: null };
-        let sawOrigin = false; let direct;
+        let sawOrigin = false; let direct; let found = null;
+        const stack = collect ? [] : null; // compact call flow, shown to the user on request
         for (const f of frames) {
             const url = f.getFileName?.() || f.getScriptNameOrSourceURL?.();
             if (!url) continue;
             if (url.endsWith('/probe.js') && url.includes(`/${SELF_FOLDER}/`)) continue;
             sawOrigin = sawOrigin || url.startsWith(location.origin);
             const owner = ownerFromUrl(url);
+            if (stack && stack.length < 25) {
+                let fn = '';
+                try { fn = f.getFunctionName?.() || f.getMethodName?.() || ''; } catch { /* ignore */ }
+                stack.push({ url, line: f.getLineNumber?.() || 0, col: f.getColumnNumber?.() || 0, fn, async: !!f.isAsync?.(), owner: owner || (url.startsWith(location.origin) ? CORE : UNKNOWN) });
+            }
             if (direct === undefined) direct = owner || CORE;
-            if (owner) return { owner, site: { url, line: f.getLineNumber?.() || 0, col: f.getColumnNumber?.() || 0 }, direct };
+            if (owner && !found) {
+                found = { owner, site: { url, line: f.getLineNumber?.() || 0, col: f.getColumnNumber?.() || 0 }, direct };
+                if (!stack) return found;
+            }
         }
-        return { owner: sawOrigin ? CORE : UNKNOWN, site: null, direct: direct ?? null };
+        const r = found || { owner: sawOrigin ? CORE : UNKNOWN, site: null, direct: direct ?? null };
+        if (stack) r.stack = stack;
+        return r;
     }
 
     // Requests that talk to an AI / external service. Cross-origin requests count too (extensions calling APIs directly).
@@ -702,11 +713,12 @@ function install() {
      * recent failing/finished API request — a best guess). Returns null for Doctor's own toasts.
      */
     function toastSource(above) {
-        const r = resolveDeep(above);
+        const r = resolveDeep(above, true);
         if (r.direct === SELF) return null;
-        if (r.owner !== CORE && r.owner !== UNKNOWN) return { owner: r.owner, site: r.site, how: 'stack', api: lastApiBy(r.owner) };
+        const stack = r.stack;
+        if (r.owner !== CORE && r.owner !== UNKNOWN) return { owner: r.owner, site: r.site, how: 'stack', api: lastApiBy(r.owner), stack };
         const c = ctx.current;
-        if (isExtOwner(c)) return { owner: c, site: null, how: 'ctx', api: lastApiBy(c) };
+        if (isExtOwner(c)) return { owner: c, site: null, how: 'ctx', api: lastApiBy(c), stack };
         const t = now();
         let best = null;
         for (let i = apiCalls.length - 1; i >= 0; i--) {
@@ -715,8 +727,8 @@ function install() {
             if (!best || (a.ok === false && best.ok !== false)) best = a;
             if (best.ok === false) break;
         }
-        if (best && best.owner !== CORE && best.owner !== UNKNOWN) return { owner: best.owner, site: best.site, how: 'api', api: { ...best } };
-        return { owner: r.owner, site: null, how: 'stack', api: best ? { ...best } : null };
+        if (best && best.owner !== CORE && best.owner !== UNKNOWN) return { owner: best.owner, site: best.site, how: 'api', api: { ...best }, stack };
+        return { owner: r.owner, site: null, how: 'stack', api: best ? { ...best } : null, stack };
     }
     function lastApiBy(owner) {
         for (let i = apiCalls.length - 1; i >= 0; i--) if (apiCalls[i].owner === owner && now() - (apiCalls[i].t1 || now()) < 10000) return { ...apiCalls[i] };

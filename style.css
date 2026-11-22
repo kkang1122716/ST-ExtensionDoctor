@@ -57,3 +57,11 @@
 .xdoc-toast-src { margin-top: 6px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.35); font-size: 0.9em; word-break: keep-all; }
 .xdoc-toast-src .xdoc-muted { opacity: 0.8; }
 .xdoc-toast-src-sub { font-size: 0.85em; opacity: 0.8; word-break: break-all; }
+.xdoc-toast-src { cursor: pointer; }
+.xdoc-toast-src:hover .xdoc-toast-src-more { text-decoration: underline; }
+.xdoc-toast-src-more { font-size: 0.85em; opacity: 0.85; margin-top: 2px; }
+.xdoc-toast-detail th { text-align: left; white-space: nowrap; padding-right: 10px; vertical-align: top; }
+.xdoc-toast-detail td { word-break: break-all; }
+.xdoc-frame-ext td { background: rgba(255, 200, 0, 0.12); }
+.xdoc-code-around pre { font-size: 0.85em; overflow-x: auto; white-space: pre; text-align: left; }
+.xdoc-code-hit { background: rgba(255, 80, 80, 0.3); display: inline-block; min-width: 100%; }

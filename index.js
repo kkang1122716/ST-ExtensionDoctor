@@ -184,14 +184,90 @@ function toastOriginHtml(src) {
     return `📍 보낸 곳: <b>${esc(toastOriginLabel(src))}</b>${guess}${api}`;
 }
 
-function tagToast($t, src) {
+function tagToast($t, src, entry) {
     const el = $t?.[0] || $t;
     if (!el || typeof el.appendChild !== 'function') return;
     const div = document.createElement('div');
     div.className = 'xdoc-toast-src';
-    div.innerHTML = toastOriginHtml(src);
+    div.title = '눌러서 자세히 보기 (어떻게 찾았는지, 코드 위치, 호출 흐름)';
+    const fill = () => { div.innerHTML = `${toastOriginHtml(src)}<div class="xdoc-toast-src-more">🔍 눌러서 자세히 보기</div>`; };
+    fill();
+    div.addEventListener('click', ev => { ev.stopPropagation(); showToastDetail(entry); });
     (el.querySelector('.toast-message') || el).appendChild(div);
-    if (probe.isExtOwner(src.owner) && !nameCache.has(src.owner)) ensureNames([src.owner]).then(() => { div.innerHTML = toastOriginHtml(src); });
+    if (probe.isExtOwner(src.owner) && !nameCache.has(src.owner)) ensureNames([src.owner]).then(fill);
+}
+
+const HOW_KO = {
+    stack: '호출 흐름에서 이 코드가 직접 보였어요. (확실)',
+    ctx: '이 확장이 등록한 콜백(타이머·이벤트 등)이 실행되는 중에 뜬 알림이에요. (확실)',
+    api: '호출 흐름에서는 확장을 못 찾아서, 알림 직전 4초 안에 이 확장이 보낸 API 요청으로 짐작했어요. (추정)',
+    core: '호출 흐름에 확장 코드가 하나도 없었어요. ST 자체 기능(메인 채팅 생성, 연결 확인 등)이 띄운 알림이에요.',
+};
+const howKo = t => (t.how === 'stack' && !probe.isExtOwner(t.owner) && t.owner !== probe.SELF ? HOW_KO.core : HOW_KO[t.how] || '');
+
+const framePath = url => shortFile(String(url || '').replace(location.origin, ''));
+function frameOwnerLabel(o) { return o === 'core' ? 'ST' : o === 'unknown' ? '?' : ownerLabel(o); }
+
+function toastDetailText(t) {
+    const L = [`[Extension Doctor] 오류 알림 상세 — ${fmtDate(t.at)}`, `알림: ${t.title ? `[${t.title}] ` : ''}${t.msg}`, `보낸 곳: ${toastOriginLabel(t)}`, `판단 근거: ${howKo(t)}`];
+    if (t.api) L.push(`요청: ${t.api.url}${t.api.status ? ` (상태 ${t.api.status})` : t.api.ok === false ? ' (연결 실패)' : ''}`);
+    if (t.site) L.push(`코드 위치: ${t.site.url}:${t.site.line}`);
+    if (t.stack?.length) {
+        L.push('호출 흐름 (위가 알림을 띄운 곳):');
+        for (const f of t.stack) L.push(`  ${f.async ? 'async ' : ''}${f.fn || '(익명)'} — ${frameOwnerLabel(f.owner)} ${framePath(f.url)}:${f.line}`);
+    }
+    return L.join('\n');
+}
+
+/** Fetch a few lines around file:line (same-origin files only) so the user can see the code that sent the request. */
+async function codeAround(site, radius = 6) {
+    try {
+        const u = new URL(site.url, location.href);
+        if (u.origin !== location.origin) return null;
+        const res = await fetch(u.href);
+        if (!res.ok) return null;
+        const lines = (await res.text()).split(/\r?\n/);
+        const from = Math.max(1, site.line - radius); const to = Math.min(lines.length, site.line + radius);
+        const out = [];
+        for (let i = from; i <= to; i++) out.push({ n: i, text: lines[i - 1].length > 240 ? `${lines[i - 1].slice(0, 240)} …` : lines[i - 1], hit: i === site.line });
+        return out;
+    } catch { return null; }
+}
+
+async function showToastDetail(t) {
+    if (!t) return;
+    const owners = [t.owner, ...(t.stack || []).map(f => f.owner)];
+    await ensureNames(owners);
+    const { Popup, POPUP_TYPE } = ctx();
+    const el = document.createElement('div');
+    el.className = 'xdoc-report xdoc-toast-detail';
+    const apiTxt = t.api ? `${t.api.url}${t.api.status ? ` · 상태 ${t.api.status}` : t.api.ok === false ? ' · 연결 실패' : ''}` : '';
+    const stackRows = (t.stack || []).map(f => {
+        const ext = probe.isExtOwner(f.owner) || f.owner === probe.SELF;
+        return `<tr class="${ext ? 'xdoc-frame-ext' : ''}"><td>${f.async ? '<span class="xdoc-muted">async</span> ' : ''}${esc(f.fn || '(익명)')}</td><td>${ext ? `<b>${esc(frameOwnerLabel(f.owner))}</b>` : esc(frameOwnerLabel(f.owner))}</td><td>${esc(framePath(f.url))}:${f.line}</td></tr>`;
+    }).join('');
+    el.innerHTML = `<h3>오류 알림 상세</h3>
+      <table class="xdoc-table"><tbody>
+        <tr><th>언제</th><td>${esc(fmtDate(t.at))}</td></tr>
+        <tr><th>알림</th><td>${esc(`${t.title ? `[${t.title}] ` : ''}${t.msg}`)}</td></tr>
+        <tr><th>보낸 곳</th><td><b>${esc(toastOriginLabel(t))}</b></td></tr>
+        <tr><th>판단 근거</th><td>${esc(howKo(t))}</td></tr>
+        ${apiTxt ? `<tr><th>요청</th><td>${esc(apiTxt)}</td></tr>` : ''}
+        ${t.site ? `<tr><th>코드 위치</th><td>${esc(t.site.url.replace(location.origin, ''))}:${t.site.line}</td></tr>` : ''}
+      </tbody></table>
+      ${t.site ? '<h4>그 위치의 코드</h4><div class="xdoc-code-around xdoc-muted">불러오는 중…</div>' : ''}
+      ${stackRows ? `<h4>호출 흐름 <span class="xdoc-muted">위가 알림을 띄운 곳, 아래로 갈수록 그걸 부른 곳. 굵은 줄이 확장 코드예요.</span></h4>
+        <table class="xdoc-table"><thead><tr><th>함수</th><th>누구</th><th>파일:줄</th></tr></thead><tbody>${stackRows}</tbody></table>` : ''}
+      <div class="xdoc-actions"><button type="button" class="menu_button" data-xdoc="copy-toast"><i class="fa-solid fa-copy"></i> 상세 복사</button></div>`;
+    el.querySelector('[data-xdoc="copy-toast"]').addEventListener('click', ev => copyText(toastDetailText(t), ev.currentTarget));
+    new Popup(el, POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true, okButton: '닫기' }).show();
+    if (t.site) {
+        const box = el.querySelector('.xdoc-code-around');
+        const lines = await codeAround(t.site);
+        if (!lines) { box.textContent = '코드를 불러오지 못했어요.'; return; }
+        box.classList.remove('xdoc-muted');
+        box.innerHTML = `<pre>${lines.map(l => `<span class="${l.hit ? 'xdoc-code-hit' : ''}">${String(l.n).padStart(5)}  ${esc(l.text)}</span>`).join('\n')}</pre>`;
+    }
 }
 
 const stripText = v => String(v ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
@@ -209,9 +285,10 @@ function patchToasts() {
             const $t = original.apply(this, arguments);
             if (src) {
                 try {
-                    tagToast($t, src);
-                    toastLog.unshift({ at: Date.now(), kind, title: stripText(title), msg: stripText(message), owner: src.owner, how: src.how, site: src.site,
-                        api: src.api ? { url: src.api.url, status: src.api.status, ok: src.api.ok } : null });
+                    const entry = { at: Date.now(), kind, title: stripText(title), msg: stripText(message), owner: src.owner, how: src.how, site: src.site,
+                        api: src.api ? { url: src.api.url, status: src.api.status, ok: src.api.ok } : null, stack: src.stack || null };
+                    tagToast($t, src, entry);
+                    toastLog.unshift(entry);
                     if (toastLog.length > TOAST_LOG_MAX) toastLog.length = TOAST_LOG_MAX;
                     console.info('[ExtensionDoctor] 알림 보낸 곳:', toastOriginLabel(src), src.site ? `${src.site.url}:${src.site.line}` : '', src.api?.url || '');
                 } catch { /* never break a toast */ }
@@ -692,9 +769,10 @@ function reportToHtml(r) {
 
     if (r.toasts?.length) {
         parts.push('<h4>최근 오류 알림과 보낸 곳 <span class="xdoc-muted">이 페이지를 연 뒤 뜬 빨간·노란 알림</span></h4>');
-        parts.push(table(['언제', '알림', '보낸 곳', '요청'], r.toasts.map(t => [esc(fmtDate(t.at)), esc(`${t.title ? `[${t.title}] ` : ''}${t.msg}`),
+        parts.push(table(['언제', '알림', '보낸 곳', '요청', ''], r.toasts.map((t, i) => [esc(fmtDate(t.at)), esc(`${t.title ? `[${t.title}] ` : ''}${t.msg}`),
             `<b>${esc(toastOriginLabel(t))}</b>${t.how === 'api' ? ' <span class="xdoc-muted">(추정)</span>' : ''}${t.site ? `<br><span class="xdoc-muted">${esc(siteStr(t.site))}</span>` : ''}`,
-            t.api ? esc(`${t.api.url}${t.api.status ? ` · ${t.api.status}` : ''}`) : ''])));
+            t.api ? esc(`${t.api.url}${t.api.status ? ` · ${t.api.status}` : ''}`) : '',
+            `<button type="button" class="menu_button xdoc-small" data-xdoc="toast-detail" data-i="${i}">자세히</button>`])));
     }
 
     if (!r.frames && r.bigFreezes?.length) {
@@ -768,6 +846,7 @@ async function showReport(r) {
         else if (act === 'fix-obs') { const o = r.hotObservers.find(x => String(x.id) === b.dataset.id); if (o) offerObserverHotfix({ type: 'rate', owner: o.owner, observerId: o.id, target: o.targets[0]?.sel || '*' }); }
         else if (act === 'fix-ev') { const e = r.events[Number(b.dataset.i)]; if (e) offerEventHotfix(e); }
         else if (act === 'fix-dom') { const d = r.domHandlers[Number(b.dataset.i)]; if (d) offerDomHotfix({ owner: d.owner, type: d.type, target: d.target }); }
+        else if (act === 'toast-detail') showToastDetail(r.toasts?.[Number(b.dataset.i)]);
         else if (act === 'fix-fz') { const f = r.bigFreezes[Number(b.dataset.i)]; if (f) offerDomHotfix({ owner: f.owner, type: f.type, target: f.target }); }
     });
     new Popup(root, POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true, okButton: '닫기' }).show();
