@@ -18,7 +18,7 @@ const DEFAULTS = {
     throttleMs: 200,
     debounceMs: 300,
     freezeAlert: true,
-    freezeMs: 1000,
+    freezeMs: 1500,
     toastSource: true,
     ai: { mode: 'current', profileId: '', profileModel: '', directUrl: '', directModel: '', rememberKey: false, maxTokens: 16000, timeoutSec: 180 },
     hotfixes: [],
@@ -34,6 +34,8 @@ function settings() {
     const s = all[MODULE];
     for (const [k, v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = structuredClone(v);
     for (const [k, v] of Object.entries(DEFAULTS.ai)) if (s.ai[k] === undefined) s.ai[k] = v;
+    // 1.3.1: default freeze threshold 1s -> 1.5s (only if the user never changed it)
+    if (!s.freezeV2) { if (Number(s.freezeMs) === 1000) s.freezeMs = 1500; s.freezeV2 = true; }
     // v1.0.0 default (4000) was too small for thinking models; lift it once.
     if (!s.ai.tokensV2) { if (Number(s.ai.maxTokens) === 4000) s.ai.maxTokens = 16000; s.ai.tokensV2 = true; }
     // Defensive: a key must never live in settings.json.
