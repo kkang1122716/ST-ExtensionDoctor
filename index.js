@@ -16,7 +16,7 @@ const DEFAULTS = {
     rateThreshold: 30,
     duration: 30,
     throttleMs: 200,
-    ai: { mode: 'current', profileId: '', profileModel: '', directUrl: '', directModel: '', rememberKey: false, maxTokens: 4000, timeoutSec: 180 },
+    ai: { mode: 'current', profileId: '', profileModel: '', directUrl: '', directModel: '', rememberKey: false, maxTokens: 16000, timeoutSec: 180 },
     hotfixes: [],
 };
 
@@ -30,6 +30,8 @@ function settings() {
     const s = all[MODULE];
     for (const [k, v] of Object.entries(DEFAULTS)) if (s[k] === undefined) s[k] = structuredClone(v);
     for (const [k, v] of Object.entries(DEFAULTS.ai)) if (s.ai[k] === undefined) s.ai[k] = v;
+    // v1.0.0 default (4000) was too small for thinking models; lift it once.
+    if (!s.ai.tokensV2) { if (Number(s.ai.maxTokens) === 4000) s.ai.maxTokens = 16000; s.ai.tokensV2 = true; }
     // Defensive: a key must never live in settings.json.
     if ('directKey' in s.ai) delete s.ai.directKey;
     return s;
@@ -41,7 +43,7 @@ const fmtMs = ms => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms.toFixed(m
 const fmtN = n => Number(n || 0).toLocaleString('ko-KR');
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-async function copyText(text) {
+async function copyText(text, anchor = null) {
     try {
         if (window.isSecureContext && navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(text);
@@ -49,13 +51,18 @@ async function copyText(text) {
             return;
         }
     } catch { /* fall through to legacy path */ }
-    // http:// (insecure context) fallback
+    // http:// (insecure context) fallback. ST popups are modal <dialog>s: everything outside the top dialog is
+    // inert, so the helper textarea must live inside that dialog or select()/execCommand silently fail.
+    const openDialogs = [...document.querySelectorAll('dialog[open]')];
+    const parent = anchor?.closest?.('dialog') || openDialogs[openDialogs.length - 1] || document.body;
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.setAttribute('readonly', '');
-    ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
-    document.body.appendChild(ta);
+    ta.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;padding:0;border:0;opacity:0;';
+    parent.appendChild(ta);
+    ta.focus();
     ta.select();
+    ta.setSelectionRange(0, text.length);
     let ok = false;
     try { ok = document.execCommand('copy'); } catch { ok = false; }
     ta.remove();
@@ -597,7 +604,7 @@ async function showReport(r) {
         const b = ev.target.closest('button[data-xdoc]');
         if (!b) return;
         const act = b.dataset.xdoc;
-        if (act === 'copy') copyText(reportToText(r));
+        if (act === 'copy') copyText(reportToText(r), b);
         else if (act === 'ai') runAiAnalysis(r);
         else if (act === 'fix-loop') { const l = r.loops[Number(b.dataset.i)]; offerObserverHotfix({ type: 'pingpong', a: l.a, b: l.b, observerIds: l.observerIds, perSec: Math.round(l.perSec) }); }
         else if (act === 'fix-obs') { const o = r.hotObservers.find(x => String(x.id) === b.dataset.id); if (o) offerObserverHotfix({ type: 'rate', owner: o.owner, observerId: o.id, target: o.targets[0]?.sel || '*' }); }
@@ -696,6 +703,7 @@ async function finishDiagnosis(stopped) {
         const frames = summarizeFrames(d.type, d.frames, d.start.at);
         const r = buildReport(d.start, end, { kind: 'diagnosis', stopped, frames, dom, scan });
         lastReport = r;
+        setLastButtons();
         await showReport(r);
     } catch (e) {
         console.error('[ExtensionDoctor]', e);
@@ -907,7 +915,7 @@ function getDirectKey() {
 async function callAi(system, user, signal) {
     const a = settings().ai;
     const c = ctx();
-    const maxTokens = clamp(Number(a.maxTokens) || 4000, 256, 64000);
+    const maxTokens = clamp(Number(a.maxTokens) || 16000, 256, 64000);
     const messages = [{ role: 'system', content: system }, { role: 'user', content: user }];
     if (a.mode === 'profile') {
         const svc = c.ConnectionManagerRequestService;
@@ -951,13 +959,91 @@ function renderMarkdown(md) {
         btn.type = 'button';
         btn.className = 'menu_button xdoc-copy-code';
         btn.innerHTML = '<i class="fa-solid fa-copy"></i> 복사';
-        btn.addEventListener('click', () => copyText(pre.querySelector('code')?.textContent ?? pre.textContent));
+        btn.addEventListener('click', () => copyText(pre.querySelector('code')?.textContent ?? pre.textContent, btn));
         pre.before(btn);
     });
     return wrap;
 }
 
 let aiRunning = null;
+let lastAi = null; // { text, dest, report } — kept for this page session so a closed result can be reopened
+
+/** Heuristic: thinking models spend output tokens on reasoning, so answers often stop mid-sentence. */
+function looksTruncated(text) {
+    const t = String(text).trimEnd();
+    if (((t.match(/```/g) || []).length % 2) === 1) return true;
+    if ((t.match(/\*\*/g) || []).length % 2 === 1) return true;
+    const last = t.slice(-1);
+    return !/[.!?…)\]}"'`」』*:>~요다음함됨임니죠세]/.test(last);
+}
+
+function fillAiView(view, ai) {
+    const truncated = looksTruncated(ai.text);
+    view.querySelector('.xdoc-ai-status').innerHTML = `<b>AI 분석 결과</b> <span class="xdoc-muted">${esc(ai.dest)}</span>
+        <button type="button" class="menu_button xdoc-small" data-xdoc="copyall"><i class="fa-solid fa-copy"></i> 전체 복사</button>
+        <button type="button" class="menu_button xdoc-small" data-xdoc="again"><i class="fa-solid fa-rotate"></i> 다른 API로 다시 분석</button>
+        ${truncated ? `<div class="xdoc-alert">⚠️ 응답이 중간에 끊긴 것 같아요. [다른 API로 다시 분석]에서 <b>응답 최대 토큰</b>을 늘려 다시 보내 보세요. (생각하는 모델은 생각하는 데도 토큰을 써서 답이 잘리기 쉬워요. 지금 설정: ${fmtN(settings().ai.maxTokens)})</div>` : ''}`;
+    const copyBtn = view.querySelector('[data-xdoc="copyall"]');
+    copyBtn.addEventListener('click', () => copyText(ai.text, copyBtn));
+    view.querySelector('[data-xdoc="again"]').addEventListener('click', () => runAiAnalysis(ai.report));
+    view.querySelector('.xdoc-ai-body').replaceChildren(renderMarkdown(ai.text));
+}
+
+function showLastAi() {
+    if (!lastAi) { toastr.info('아직 AI 분석 결과가 없어요.'); return; }
+    const { Popup, POPUP_TYPE } = ctx();
+    const view = document.createElement('div');
+    view.className = 'xdoc-ai';
+    view.innerHTML = '<div class="xdoc-ai-status"></div><div class="xdoc-ai-body"></div>';
+    fillAiView(view, lastAi);
+    new Popup(view, POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true, okButton: '닫기' }).show();
+}
+
+function setLastButtons() {
+    $('#xdoc_last_report').prop('disabled', !lastReport).toggleClass('disabled', !lastReport);
+    $('#xdoc_last_ai').prop('disabled', !lastAi).toggleClass('disabled', !lastAi);
+}
+
+/** "Where to send" picker shown inside the AI confirm popup, so the API can be changed without leaving the report. */
+function destinationPickerHtml() {
+    const a = settings().ai;
+    let profiles = [];
+    try { profiles = ctx().ConnectionManagerRequestService.getSupportedProfiles(); } catch { /* connection manager off */ }
+    const opts = [`<option value="current">현재 채팅 연결 (${esc(ctx().mainApi)})</option>`]
+        .concat(profiles.map(p => `<option value="profile:${esc(p.id)}">연결 프로필: ${esc(p.name)}${p.model ? ` (${esc(p.model)})` : ''}</option>`))
+        .concat(`<option value="direct">직접 입력: ${esc(a.directUrl || '(설정 패널에서 URL 입력 필요)')}${a.directModel ? ` / ${esc(a.directModel)}` : ''}</option>`);
+    return `<div class="xdoc-dest">
+        <label>보낼 곳 <select class="text_pole" data-dest="sel">${opts.join('')}</select></label>
+        <label data-dest="modelrow">모델 덮어쓰기 (비우면 프로필의 모델)
+          <input type="text" class="text_pole" data-dest="model" value="${esc(a.profileModel)}" placeholder="예: gemini-2.5-pro"></label>
+        <label>응답 최대 토큰 <input type="number" class="text_pole" data-dest="tokens" min="256" max="64000" value="${esc(a.maxTokens)}"></label>
+      </div>`;
+}
+
+function bindDestinationPicker(el) {
+    const a = settings().ai;
+    const sel = el.querySelector('[data-dest="sel"]');
+    const wanted = a.mode === 'profile' ? `profile:${a.profileId}` : a.mode;
+    sel.value = [...sel.options].some(o => o.value === wanted) ? wanted : 'current';
+    const sync = () => { el.querySelector('[data-dest="modelrow"]').style.display = sel.value.startsWith('profile:') ? '' : 'none'; };
+    sel.addEventListener('change', sync);
+    sync();
+}
+
+function applyDestinationPicker(el) {
+    const s = settings();
+    const v = el.querySelector('[data-dest="sel"]').value;
+    if (v.startsWith('profile:')) { s.ai.mode = 'profile'; s.ai.profileId = v.slice(8); s.ai.profileModel = el.querySelector('[data-dest="model"]').value.trim(); }
+    else s.ai.mode = v;
+    s.ai.maxTokens = clamp(Number(el.querySelector('[data-dest="tokens"]').value) || 16000, 256, 64000);
+    save();
+    // keep the settings panel in sync
+    $(`input[name="xdoc_ai_mode"][value="${s.ai.mode}"]`).prop('checked', true);
+    $('#xdoc_profile_model').val(s.ai.profileModel);
+    $('#xdoc_max_tokens').val(s.ai.maxTokens);
+    showAiMode();
+    $('#xdoc_profile').val(s.ai.profileId);
+}
 
 async function runAiAnalysis(r) {
     if (aiRunning) { toastr.warning('AI 분석이 이미 진행 중이에요.'); return; }
@@ -972,13 +1058,15 @@ async function runAiAnalysis(r) {
     const confirmEl = document.createElement('div');
     confirmEl.className = 'xdoc-fix';
     confirmEl.innerHTML = `<h3>AI 분석 — 보낼 내용 확인</h3>
-      <p>보낼 곳: <b>${esc(aiDestination())}</b></p>
+      ${destinationPickerHtml()}
       <ul><li>진단 리포트 요약 (텍스트 ${fmtN(summary.length)}자)</li>
       ${code.map(c => `<li>${esc(ownerLabel(c.owner))} — 코드 ${c.lines}줄 (${esc(c.parts.map(p => `${p.file}:${p.from}-${p.to}`).join(', '))})</li>`).join('') || '<li>코드 발췌 없음</li>'}</ul>
-      <p>대략 <b>${fmtN(approxTokens)} 토큰</b> + 응답 최대 ${fmtN(settings().ai.maxTokens)} 토큰. 전체 파일은 보내지 않아요.</p>
-      ${settings().ai.mode === 'current' ? '<div class="xdoc-muted">현재 채팅 연결을 쓰면 그 API의 요금이 들어요.</div>' : ''}`;
+      <p>대략 <b>${fmtN(approxTokens)} 토큰</b>을 보내요. 전체 파일은 보내지 않아요.</p>
+      <div class="xdoc-muted">현재 채팅 연결이나 연결 프로필을 쓰면 그 API의 요금이 들어요.</div>`;
+    bindDestinationPicker(confirmEl);
     const ok = await new Popup(confirmEl, POPUP_TYPE.CONFIRM, '', { okButton: '보내기', cancelButton: '취소', wide: true, allowVerticalScrolling: true }).show();
     if (ok !== POPUP_RESULT.AFFIRMATIVE) return;
+    applyDestinationPicker(confirmEl);
 
     const controller = new AbortController();
     const a = settings().ai;
@@ -1003,9 +1091,9 @@ async function runAiAnalysis(r) {
             new Promise((_, rej) => controller.signal.addEventListener('abort', () => rej(new DOMException(String(controller.signal.reason || 'aborted'), 'AbortError')), { once: true })),
         ]);
         if (!text || !String(text).trim()) throw new Error('빈 응답을 받았어요.');
-        view.querySelector('.xdoc-ai-status').innerHTML = `<b>AI 분석 결과</b> <span class="xdoc-muted">${esc(aiDestination())}</span> <button type="button" class="menu_button xdoc-small" data-xdoc="copyall"><i class="fa-solid fa-copy"></i> 전체 복사</button>`;
-        view.querySelector('[data-xdoc="copyall"]').addEventListener('click', () => copyText(String(text)));
-        view.querySelector('.xdoc-ai-body').replaceChildren(renderMarkdown(String(text)));
+        lastAi = { text: String(text), dest: aiDestination(), report: r };
+        fillAiView(view, lastAi);
+        setLastButtons();
     } catch (e) {
         const reason = controller.signal.reason;
         const msg = reason === 'timeout' ? `시간 초과 (${timeoutMs / 1000}초)` : reason === 'user' ? '중지했어요.' : reason === 'closed' ? '창을 닫아 중지했어요.' : (e?.cause?.message || e?.message || String(e));
@@ -1061,9 +1149,12 @@ async function initPanel() {
     refreshProfiles();
     showAiMode();
     renderHotfixList();
+    setLastButtons();
 
     $root.on('click', '#xdoc_start', () => (diag ? finishDiagnosis(true) : startDiagnosis()));
     $root.on('click', '#xdoc_quick', () => showQuickReport(lastAlerts[0] || null));
+    $root.on('click', '#xdoc_last_report', () => { if (lastReport) showReport(lastReport); else toastr.info('아직 진단 리포트가 없어요. [진단 시작]을 먼저 눌러 주세요.'); });
+    $root.on('click', '#xdoc_last_ai', showLastAi);
     $root.on('input', '#xdoc_duration', function () { s.duration = Number(this.value); $('#xdoc_duration_val').text(`${s.duration}초`); save(); });
     $root.on('change', '#xdoc_loop', function () { s.loopDetect = this.checked; probe.config.loopDetect = this.checked; save(); });
     $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 30, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });
@@ -1081,7 +1172,7 @@ async function initPanel() {
     $root.on('change', '#xdoc_profile_model', function () { s.ai.profileModel = this.value.trim(); save(); });
     $root.on('change', '#xdoc_direct_url', function () { s.ai.directUrl = this.value.trim(); save(); });
     $root.on('change', '#xdoc_direct_model', function () { s.ai.directModel = this.value.trim(); save(); });
-    $root.on('change', '#xdoc_max_tokens', function () { s.ai.maxTokens = clamp(Number(this.value) || 4000, 256, 64000); this.value = s.ai.maxTokens; save(); });
+    $root.on('change', '#xdoc_max_tokens', function () { s.ai.maxTokens = clamp(Number(this.value) || 16000, 256, 64000); this.value = s.ai.maxTokens; save(); });
     $root.on('change', '#xdoc_timeout', function () { s.ai.timeoutSec = clamp(Number(this.value) || 180, 15, 900); this.value = s.ai.timeoutSec; save(); });
     $root.on('input', '#xdoc_direct_key', function () {
         memKey = this.value;

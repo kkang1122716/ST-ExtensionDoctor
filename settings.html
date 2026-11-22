@@ -12,6 +12,10 @@
                     <button type="button" id="xdoc_start" class="menu_button"><i class="fa-solid fa-stethoscope"></i> 진단 시작</button>
                     <button type="button" id="xdoc_quick" class="menu_button" title="새로고침 이후 지금까지 모은 기록으로 바로 요약해요"><i class="fa-solid fa-list"></i> 지금까지 요약</button>
                 </div>
+                <div class="xdoc-row">
+                    <button type="button" id="xdoc_last_report" class="menu_button" title="마지막 진단 리포트를 다시 열어요 (새로고침하면 사라져요)"><i class="fa-solid fa-file-lines"></i> 마지막 리포트 보기</button>
+                    <button type="button" id="xdoc_last_ai" class="menu_button" title="마지막 AI 분석 결과를 다시 열어요 (새로고침하면 사라져요)"><i class="fa-solid fa-robot"></i> 마지막 AI 결과 보기</button>
+                </div>
                 <label for="xdoc_duration">진단 시간: <span id="xdoc_duration_val">30초</span></label>
                 <input type="range" id="xdoc_duration" min="10" max="60" step="5" value="30">
                 <div id="xdoc_status" class="xdoc-muted"></div>
@@ -57,7 +61,7 @@
                 </div>
 
                 <div class="xdoc-row xdoc-row-2">
-                    <label>응답 최대 토큰 <input type="number" id="xdoc_max_tokens" class="text_pole" min="256" max="64000" value="4000"></label>
+                    <label>응답 최대 토큰 <input type="number" id="xdoc_max_tokens" class="text_pole" min="256" max="64000" value="16000"></label>
                     <label>시간 제한(초) <input type="number" id="xdoc_timeout" class="text_pole" min="15" max="900" value="180"></label>
                 </div>
             </div>
