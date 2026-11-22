@@ -1261,8 +1261,24 @@ function renderMarkdown(md) {
     return wrap;
 }
 
-let aiRunning = null;
+let aiRunning = null; // AbortController of the analysis in progress
+let aiLive = null; // { view, open } — the progress view of the running analysis; it keeps running when the popup is closed
 let lastAi = null; // { text, dest, report } — kept for this page session so a closed result can be reopened
+
+/** Show the progress/result view of the running analysis in a popup (again). Closing it never stops the analysis. */
+function openLiveAi() {
+    if (!aiLive) return;
+    const { Popup, POPUP_TYPE } = ctx();
+    aiLive.open = true;
+    new Popup(aiLive.view, POPUP_TYPE.TEXT, '', {
+        wide: true, large: true, allowVerticalScrolling: true, okButton: '닫기',
+        onClose: () => {
+            if (!aiLive) return;
+            aiLive.open = false;
+            if (aiRunning) toastr.info('창을 닫아도 AI 분석은 계속돼요. 끝나면 알림으로 알려드릴게요.', 'Extension Doctor', { timeOut: 4000 });
+        },
+    }).show();
+}
 
 /** Heuristic: thinking models spend output tokens on reasoning, so answers often stop mid-sentence. */
 function looksTruncated(text) {
@@ -1286,6 +1302,7 @@ function fillAiView(view, ai) {
 }
 
 function showLastAi() {
+    if (aiRunning && aiLive) { if (!aiLive.open) openLiveAi(); return; }
     if (!lastAi) { toastr.info('아직 AI 분석 결과가 없어요.'); return; }
     const { Popup, POPUP_TYPE } = ctx();
     const view = document.createElement('div');
@@ -1297,7 +1314,9 @@ function showLastAi() {
 
 function setLastButtons() {
     $('#xdoc_last_report').prop('disabled', !lastReport).toggleClass('disabled', !lastReport);
-    $('#xdoc_last_ai').prop('disabled', !lastAi).toggleClass('disabled', !lastAi);
+    const canAi = !!lastAi || !!aiRunning;
+    $('#xdoc_last_ai').prop('disabled', !canAi).toggleClass('disabled', !canAi)
+        .html(aiRunning ? '<i class="fa-solid fa-spinner fa-spin"></i> AI 분석 진행 중 (보기)' : '<i class="fa-solid fa-robot"></i> 마지막 AI 결과 보기');
 }
 
 /** "Where to send" picker shown inside the AI confirm popup, so the API can be changed without leaving the report. */
@@ -1342,7 +1361,7 @@ function applyDestinationPicker(el) {
 }
 
 async function runAiAnalysis(r) {
-    if (aiRunning) { toastr.warning('AI 분석이 이미 진행 중이에요.'); return; }
+    if (aiRunning) { toastr.warning('AI 분석이 이미 진행 중이에요.'); if (aiLive && !aiLive.open) openLiveAi(); return; }
     const { Popup, POPUP_TYPE, POPUP_RESULT } = ctx();
     let code;
     try { code = await collectCode(r); } catch (e) { code = []; console.error(e); }
@@ -1370,16 +1389,18 @@ async function runAiAnalysis(r) {
     const view = document.createElement('div');
     view.className = 'xdoc-ai';
     view.innerHTML = `<div class="xdoc-ai-status"><i class="fa-solid fa-spinner fa-spin"></i> AI 분석 중… <span class="xdoc-muted">${esc(aiDestination())}</span>
-        <button type="button" class="menu_button xdoc-small" data-xdoc="stop">중지</button></div><div class="xdoc-ai-body"></div>`;
+        <button type="button" class="menu_button xdoc-small" data-xdoc="stop">중지</button>
+        <div class="xdoc-muted">창을 닫아도 분석은 계속돼요. 끝나면 알림이 뜨고, 설정 패널의 [AI 분석 진행 중] 버튼으로 다시 볼 수 있어요.</div></div><div class="xdoc-ai-body"></div>`;
     const stop = (why) => {
         if (controller.signal.aborted) return;
         controller.abort(why);
         if (a.mode === 'current') { try { ctx().stopGeneration(); } catch { /* ignore */ } }
     };
     view.querySelector('[data-xdoc="stop"]').addEventListener('click', () => stop('user'));
-    const popup = new Popup(view, POPUP_TYPE.TEXT, '', { wide: true, large: true, allowVerticalScrolling: true, okButton: '닫기', onClosing: () => { stop('closed'); return true; } });
-    popup.show();
     aiRunning = controller;
+    aiLive = { view, open: false };
+    setLastButtons();
+    openLiveAi();
     const timer = T.setTimeout.call(window, () => stop('timeout'), timeoutMs);
     try {
         const text = await Promise.race([
@@ -1389,16 +1410,22 @@ async function runAiAnalysis(r) {
         if (!text || !String(text).trim()) throw new Error('빈 응답을 받았어요.');
         lastAi = { text: String(text), dest: aiDestination(), report: r };
         fillAiView(view, lastAi);
-        setLastButtons();
+        if (!aiLive?.open) {
+            toastr.success('AI 분석이 끝났어요. 여기를 눌러 결과를 보세요.', 'Extension Doctor', {
+                timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: true, onclick: () => showLastAi(),
+            });
+        }
     } catch (e) {
         const reason = controller.signal.reason;
-        const msg = reason === 'timeout' ? `시간 초과 (${timeoutMs / 1000}초)` : reason === 'user' ? '중지했어요.' : reason === 'closed' ? '창을 닫아 중지했어요.' : (e?.cause?.message || e?.message || String(e));
-        if (reason !== 'closed') view.querySelector('.xdoc-ai-status').innerHTML = `<span class="xdoc-bad">AI 분석 실패: ${esc(msg)}</span>`;
-        if (reason !== 'user' && reason !== 'closed') toastr.error(`AI 분석 실패: ${msg}`, 'Extension Doctor');
+        const msg = reason === 'timeout' ? `시간 초과 (${timeoutMs / 1000}초)` : reason === 'user' ? '중지했어요.' : (e?.cause?.message || e?.message || String(e));
+        view.querySelector('.xdoc-ai-status').innerHTML = `<span class="xdoc-bad">AI 분석 실패: ${esc(msg)}</span>`;
+        if (reason !== 'user') toastr.error(`AI 분석 실패: ${msg}`, 'Extension Doctor');
         console.error('[ExtensionDoctor] AI', e);
     } finally {
         T.clearTimeout.call(window, timer);
         aiRunning = null;
+        aiLive = null;
+        setLastButtons();
     }
 }
 
