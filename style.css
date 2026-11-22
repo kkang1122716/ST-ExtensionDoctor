@@ -1,0 +1,49 @@
+/* Extension Doctor */
+.xdoc-settings .xdoc-section { margin: 6px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--SmartThemeBorderColor); }
+.xdoc-settings .xdoc-section:last-child { border-bottom: 0; }
+.xdoc-section-title { font-weight: bold; margin-bottom: 4px; }
+.xdoc-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0; }
+.xdoc-row-2 > label { flex: 1 1 140px; display: flex; flex-direction: column; gap: 2px; }
+.xdoc-row select.text_pole { flex: 1 1 auto; min-width: 0; }
+.xdoc-muted { opacity: 0.7; font-size: 0.9em; }
+.xdoc-warn { color: var(--warning, #e0a030); }
+.xdoc-bad { color: var(--fullred, #e05050); }
+.xdoc-hf { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 3px 0; }
+.xdoc-small { padding: 2px 8px !important; font-size: 0.85em; margin: 0 !important; white-space: nowrap; }
+.xdoc-num { width: 6em !important; display: inline-block !important; margin: 0 4px !important; }
+
+/* toast */
+.xdoc-toast { display: flex; flex-direction: column; gap: 6px; min-width: 200px; flex: 1 1 auto; }
+.xdoc-toast-btns { display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px; }
+.xdoc-toast-btns .menu_button { width: auto !important; flex: 1 1 auto; writing-mode: horizontal-tb; white-space: normal; font-size: 0.85em; padding: 3px 8px; margin: 0; }
+
+/* report */
+.xdoc-report { text-align: left; }
+.xdoc-report h4 { margin: 14px 0 4px; }
+.xdoc-report-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.xdoc-report-btns { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; }
+.xdoc-report .menu_button, .xdoc-ai .menu_button, .xdoc-settings .menu_button { width: auto !important; white-space: nowrap; word-break: keep-all; }
+.xdoc-alert { margin: 8px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--warning, #e0a030); }
+.xdoc-table-wrap { overflow-x: auto; max-width: 100%; }
+.xdoc-table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+.xdoc-table th, .xdoc-table td { border-bottom: 1px solid var(--SmartThemeBorderColor); padding: 3px 6px; vertical-align: top; text-align: left; word-break: keep-all; overflow-wrap: anywhere; }
+.xdoc-table th { white-space: nowrap; }
+.xdoc-table td { min-width: 3.5em; }
+.xdoc-table td:first-child { min-width: 7em; }
+.xdoc-table th { position: sticky; top: 0; background: var(--SmartThemeBlurTintColor); }
+.xdoc-empty { opacity: 0.6; font-size: 0.9em; padding: 2px 0; }
+.xdoc-sev-high { color: var(--fullred, #e05050); font-weight: bold; }
+.xdoc-sev-mid { color: var(--warning, #e0a030); }
+.xdoc-sev-low { opacity: 0.7; }
+
+/* hotfix / confirm */
+.xdoc-fix { text-align: left; }
+.xdoc-fix .radio_label { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.xdoc-desc { margin: 2px 0 4px 22px; font-size: 0.9em; opacity: 0.85; }
+.xdoc-fix ul { margin: 4px 0 8px 18px; }
+
+/* AI */
+.xdoc-ai { text-align: left; }
+.xdoc-ai-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.xdoc-ai-md pre { position: relative; overflow-x: auto; }
+.xdoc-copy-code { float: right; font-size: 0.8em; padding: 2px 8px !important; margin: 4px 0 -4px !important; }

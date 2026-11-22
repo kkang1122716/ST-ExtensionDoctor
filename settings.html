@@ -1,0 +1,71 @@
+<div id="xdoc_settings" class="xdoc-settings">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b><i class="fa-solid fa-stethoscope"></i> Extension Doctor</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+
+            <div class="xdoc-section">
+                <div class="xdoc-section-title">진단</div>
+                <div class="xdoc-row">
+                    <button type="button" id="xdoc_start" class="menu_button"><i class="fa-solid fa-stethoscope"></i> 진단 시작</button>
+                    <button type="button" id="xdoc_quick" class="menu_button" title="새로고침 이후 지금까지 모은 기록으로 바로 요약해요"><i class="fa-solid fa-list"></i> 지금까지 요약</button>
+                </div>
+                <label for="xdoc_duration">진단 시간: <span id="xdoc_duration_val">30초</span></label>
+                <input type="range" id="xdoc_duration" min="10" max="60" step="5" value="30">
+                <div id="xdoc_status" class="xdoc-muted"></div>
+                <small class="xdoc-muted">채팅창에 <code>/doctor</code>를 입력해도 진단이 시작돼요.</small>
+            </div>
+
+            <div class="xdoc-section">
+                <div class="xdoc-section-title">상시 루프 감지</div>
+                <label class="checkbox_label"><input type="checkbox" id="xdoc_loop"> 켜기 (두 확장이 서로 다시 그리는 루프를 자동으로 알려줘요)</label>
+                <label for="xdoc_threshold">감시자 1개가 3초 넘게 초당 이 횟수보다 많이 불리면 경고</label>
+                <input type="number" id="xdoc_threshold" class="text_pole" min="5" max="1000" value="30">
+            </div>
+
+            <div class="xdoc-section">
+                <div class="xdoc-section-title">AI 분석 연결</div>
+                <label class="radio_label"><input type="radio" name="xdoc_ai_mode" value="current"> 현재 채팅 연결</label>
+                <label class="radio_label"><input type="radio" name="xdoc_ai_mode" value="profile"> ST 연결 프로필</label>
+                <label class="radio_label"><input type="radio" name="xdoc_ai_mode" value="direct"> 직접 입력 (OpenAI 호환)</label>
+
+                <div class="xdoc-ai-mode" data-mode="current">
+                    <small class="xdoc-muted">지금 채팅에 쓰는 API·모델로 보내요.</small>
+                </div>
+
+                <div class="xdoc-ai-mode" data-mode="profile">
+                    <div class="xdoc-row">
+                        <select id="xdoc_profile" class="text_pole"></select>
+                        <button type="button" id="xdoc_profile_refresh" class="menu_button" title="목록 새로고침"><i class="fa-solid fa-rotate"></i></button>
+                    </div>
+                    <label for="xdoc_profile_model">모델 덮어쓰기 (비우면 프로필의 모델)</label>
+                    <input type="text" id="xdoc_profile_model" class="text_pole" placeholder="예: gpt-4.1-mini">
+                </div>
+
+                <div class="xdoc-ai-mode" data-mode="direct">
+                    <label for="xdoc_direct_url">API URL (…/v1 까지)</label>
+                    <input type="text" id="xdoc_direct_url" class="text_pole" placeholder="https://api.openai.com/v1">
+                    <label for="xdoc_direct_model">모델</label>
+                    <input type="text" id="xdoc_direct_model" class="text_pole" placeholder="예: gpt-4.1-mini">
+                    <label for="xdoc_direct_key">API 키</label>
+                    <input type="password" id="xdoc_direct_key" class="text_pole" autocomplete="off" placeholder="sk-...">
+                    <label class="checkbox_label"><input type="checkbox" id="xdoc_remember_key"> 이 브라우저에 기억 (체크 안 하면 새로고침 시 지워짐)</label>
+                    <small class="xdoc-muted">키는 ST 설정 파일(settings.json)에 저장되지 않아요. 요청은 ST 서버를 거쳐 전달돼요(브라우저 CORS 회피).</small>
+                    <small id="xdoc_http_note" class="xdoc-warn" style="display:none">⚠️ 지금 http:// 로 접속 중이라 키가 브라우저→ST 서버 구간을 암호화 없이 지나가요. (ST에 다른 API 키를 넣을 때와 같은 조건)</small>
+                </div>
+
+                <div class="xdoc-row xdoc-row-2">
+                    <label>응답 최대 토큰 <input type="number" id="xdoc_max_tokens" class="text_pole" min="256" max="64000" value="4000"></label>
+                    <label>시간 제한(초) <input type="number" id="xdoc_timeout" class="text_pole" min="15" max="900" value="180"></label>
+                </div>
+            </div>
+
+            <div class="xdoc-section">
+                <div class="xdoc-section-title">적용 중인 보정</div>
+                <div id="xdoc_hotfix_list"></div>
+            </div>
+        </div>
+    </div>
+</div>
