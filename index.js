@@ -270,7 +270,27 @@ async function showToastDetail(t) {
     }
 }
 
-const stripText = v => String(v ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+/**
+ * Mask things that look like secrets (API keys, bearer tokens, key=… query params) before text is stored,
+ * shown in reports, copied, or sent to an AI. Error messages and extension code can contain them.
+ */
+const keepHead = m => `${m.slice(0, 4)}***`;
+const SECRET_RULES = [
+    [/\b(?:sk|pk|rk)-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}/g, keepHead], // OpenAI / Anthropic / OpenRouter style (sk-..., sk-ant-..., sk-or-v1-...)
+    [/\bAIza[0-9A-Za-z_-]{30,}/g, keepHead], // Google
+    [/\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,})/g, keepHead], // GitHub
+    [/\bxai-[A-Za-z0-9]{20,}/g, keepHead],
+    [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi, (m, kind) => `${kind} ***`],
+    [/([?&](?:key|api_key|apikey|token|access_token|password)=)[^&\s"'#]+/gi, (m, head) => `${head}***`],
+    [/((?:api[_-]?key|apikey|secret|password|access[_-]?token|authorization)["']?\s*[:=]\s*["'])[^"'\n]{6,}(["'])/gi, (m, head, q) => `${head}***${q}`],
+];
+function redactSecrets(text) {
+    let s = String(text ?? '');
+    for (const [re, fn] of SECRET_RULES) s = s.replace(re, fn);
+    return s;
+}
+
+const stripText = v => redactSecrets(String(v ?? '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 160);
 
 /** Wrap toastr.error/warning so every error toast says which extension (or ST itself) caused it. */
 function patchToasts() {
@@ -840,7 +860,7 @@ async function showReport(r) {
         const b = ev.target.closest('button[data-xdoc]');
         if (!b) return;
         const act = b.dataset.xdoc;
-        if (act === 'copy') copyText(reportToText(r), b);
+        if (act === 'copy') copyText(redactSecrets(reportToText(r)), b);
         else if (act === 'ai') runAiAnalysis(r);
         else if (act === 'fix-loop') { const l = r.loops[Number(b.dataset.i)]; offerObserverHotfix({ type: 'pingpong', a: l.a, b: l.b, observerIds: l.observerIds, perSec: Math.round(l.perSec) }); }
         else if (act === 'fix-obs') { const o = r.hotObservers.find(x => String(x.id) === b.dataset.id); if (o) offerObserverHotfix({ type: 'rate', owner: o.owner, observerId: o.id, target: o.targets[0]?.sel || '*' }); }
@@ -1304,6 +1324,12 @@ async function callAi(system, user, signal) {
     if (a.mode === 'direct') {
         const key = getDirectKey();
         if (!a.directUrl) throw new Error('API URL을 입력해 주세요.');
+        let du;
+        try { du = new URL(a.directUrl); } catch { throw new Error('API URL 형식이 올바르지 않아요. 예: https://api.example.com/v1'); }
+        if (!/^https?:$/.test(du.protocol)) throw new Error('API URL은 http:// 또는 https:// 로 시작해야 해요.');
+        if (du.username || du.password) throw new Error('API URL 안에 아이디·비밀번호를 넣지 마세요. 키는 키 칸에 넣어 주세요.');
+        const local = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[::1\])/.test(du.hostname);
+        if (du.protocol === 'http:' && !local && key) throw new Error('키를 암호화 없이(http://) 외부 주소로 보낼 수 없어요. https:// 주소를 써 주세요.');
         if (!a.directModel) throw new Error('모델 이름을 입력해 주세요.');
         // custom source + custom_include_headers: the backend spreads these headers after its own Authorization,
         // so the key is used for this request only and never written to secrets/settings (chat-completions.js).
@@ -1327,10 +1353,25 @@ async function callAi(system, user, signal) {
 function renderMarkdown(md) {
     const { showdown, DOMPurify } = { showdown: libs().showdown || window.showdown, DOMPurify: libs().DOMPurify || window.DOMPurify };
     const conv = new showdown.Converter({ tables: true, ghCodeBlocks: true, strikethrough: true, simpleLineBreaks: true, openLinksInNewWindow: true });
-    const html = DOMPurify.sanitize(conv.makeHtml(md), { FORBID_TAGS: ['style', 'iframe', 'form', 'input'], FORBID_ATTR: ['style'] });
+    // The AI saw third-party extension code, which may carry prompt-injection text. Anything that loads a remote
+    // resource on render (images, media, CSS, frames) could leak data in its URL, so only plain text/markup is kept.
+    const html = DOMPurify.sanitize(conv.makeHtml(md), {
+        FORBID_TAGS: ['style', 'link', 'meta', 'base', 'iframe', 'frame', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select',
+            'img', 'picture', 'source', 'video', 'audio', 'track', 'svg', 'math', 'image'],
+        FORBID_ATTR: ['style', 'srcset', 'src', 'background', 'poster', 'action', 'formaction', 'ping', 'id', 'name'],
+    });
     const wrap = document.createElement('div');
     wrap.className = 'xdoc-ai-md';
     wrap.innerHTML = html;
+    // Links: http(s) only, always in a new tab without access back to this page.
+    wrap.querySelectorAll('a').forEach(a => {
+        let ok = false;
+        try { ok = /^https?:$/.test(new URL(a.getAttribute('href') || '', location.href).protocol) && !!a.getAttribute('href'); } catch { ok = false; }
+        if (!ok) { a.replaceWith(document.createTextNode(a.textContent || '')); return; }
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer nofollow';
+        a.referrerPolicy = 'no-referrer';
+    });
     wrap.querySelectorAll('pre').forEach(pre => {
         const btn = document.createElement('button');
         btn.type = 'button';
@@ -1448,7 +1489,8 @@ async function runAiAnalysis(r) {
     try { code = await collectCode(r); } catch (e) { code = []; console.error(e); }
     const summary = reportToText(r).slice(0, 9000);
     const codeText = code.map(c => `### ${ownerLabel(c.owner)}\n` + c.parts.map(p => `파일 ${p.file} (줄 ${p.from}–${p.to}) — ${p.why}\n\`\`\`js\n${p.code}\n\`\`\``).join('\n')).join('\n\n');
-    const user = `# 진단 리포트\n${summary}\n\n# 지목된 코드 발췌 (확장당 최대 150줄)\n${codeText || '(발췌 없음)'}`;
+    // Secrets (keys/tokens in error messages or hard-coded in extension code) never leave the browser.
+    const user = redactSecrets(`# 진단 리포트\n${summary}\n\n# 지목된 코드 발췌 (확장당 최대 150줄)\n${codeText || '(발췌 없음)'}`);
     const approxTokens = Math.round((AI_SYSTEM.length + user.length) / 3);
 
     const confirmEl = document.createElement('div');
@@ -1498,7 +1540,7 @@ async function runAiAnalysis(r) {
         }
     } catch (e) {
         const reason = controller.signal.reason;
-        const msg = reason === 'timeout' ? `시간 초과 (${timeoutMs / 1000}초)` : reason === 'user' ? '중지했어요.' : (e?.cause?.message || e?.message || String(e));
+        const msg = reason === 'timeout' ? `시간 초과 (${timeoutMs / 1000}초)` : reason === 'user' ? '중지했어요.' : redactSecrets(e?.cause?.message || e?.message || String(e));
         view.querySelector('.xdoc-ai-status').innerHTML = `<span class="xdoc-bad">AI 분석 실패: ${esc(msg)}</span>`;
         if (reason !== 'user') toastr.error(`AI 분석 실패: ${msg}`, 'Extension Doctor');
         console.error('[ExtensionDoctor] AI', e);
