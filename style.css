@@ -11,6 +11,14 @@
 .xdoc-good { color: var(--okGreen, #3fae5a); font-weight: bold; }
 .xdoc-hf { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 3px 0; }
 .xdoc-small { padding: 2px 8px !important; font-size: 0.85em; margin: 0 !important; white-space: nowrap; }
+.xdoc-small:disabled { opacity: 0.45; cursor: default; }
+.xdoc-hf-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
+.xdoc-hf-bar > span { margin-right: auto; }
+.xdoc-hf-list { max-height: 360px; overflow-y: auto; margin-top: 4px; border-top: 1px solid var(--SmartThemeBorderColor, #555); }
+.xdoc-hf-check { display: flex; align-items: flex-start; gap: 4px; flex: 1; min-width: 0; cursor: pointer; margin: 0; }
+.xdoc-hf-check input { margin-top: 3px; flex: none; }
+.xdoc-hf-no { opacity: 0.6; flex: none; }
+.xdoc-danger { color: #ff8a80 !important; }
 .xdoc-num { width: 6em !important; display: inline-block !important; margin: 0 4px !important; }
 
 /* toast */

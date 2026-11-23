@@ -1213,10 +1213,40 @@ async function renderHotfixList() {
     if (!box || !probe) return;
     const rules = probe.rules;
     await ensureNames(rules.map(r => r.owner).concat(rules.flatMap(r => r.partners || [])));
+    const ids = new Set(rules.map(r => r.id));
+    for (const id of hfSel) if (!ids.has(id)) hfSel.delete(id);
     if (!rules.length) { box.innerHTML = '<div class="xdoc-muted">적용 중인 보정이 없어요.</div>'; return; }
-    box.innerHTML = rules.map(r => `<div class="xdoc-hf">
-        <span>${esc(ruleLabel(r))} <span class="xdoc-muted">${r.persist ? '(기억됨)' : '(이번만)'}</span></span>
-        <button type="button" class="menu_button xdoc-small" data-hf="${esc(r.id)}">해제</button></div>`).join('');
+    const n = hfSel.size;
+    box.innerHTML = `<div class="xdoc-hf-bar">
+        <span class="xdoc-muted">총 ${rules.length}개 · 선택 <b>${n}</b>개</span>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="all">전체 선택</button>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="none">선택 비우기</button>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="between" title="체크한 것 중 맨 위와 맨 아래 사이를 모두 선택해요">사이 모두 선택</button>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="removeSel" ${n ? '' : 'disabled'}>선택한 ${n}개 해제</button>
+        <button type="button" class="menu_button xdoc-small xdoc-danger" data-hfbulk="removeAll">전체 해제</button>
+      </div>
+      <small class="xdoc-muted">범위 선택: 시작과 끝을 체크하고 "사이 모두 선택"을 누르거나, PC에서는 Shift를 누른 채 끝을 클릭하세요.</small>
+      <div class="xdoc-hf-list">${rules.map((r, i) => `<div class="xdoc-hf">
+        <label class="xdoc-hf-check"><input type="checkbox" data-hfsel="${esc(r.id)}" data-idx="${i}" ${hfSel.has(r.id) ? 'checked' : ''}>
+        <span class="xdoc-hf-no">${i + 1}.</span> <span>${esc(ruleLabel(r))} <span class="xdoc-muted">${r.persist ? '(기억됨)' : '(이번만)'}</span></span></label>
+        <button type="button" class="menu_button xdoc-small" data-hf="${esc(r.id)}">해제</button></div>`).join('')}</div>`;
+}
+
+const hfSel = new Set();
+let hfLastIdx = -1;
+
+async function removeRulesBulk(idList, what) {
+    if (!idList.length) return;
+    const { Popup, POPUP_TYPE, POPUP_RESULT } = ctx();
+    const res = await new Popup(`<p>${esc(what)} 보정 <b>${idList.length}개</b>를 해제할까요?</p><small class="xdoc-muted">해제하면 그 확장은 원래대로 동작해요. 다시 필요하면 진단에서 다시 적용할 수 있어요.</small>`,
+        POPUP_TYPE.CONFIRM, '', { okButton: '해제', cancelButton: '취소' }).show();
+    if (res !== POPUP_RESULT.AFFIRMATIVE) return;
+    const drop = new Set(idList);
+    probe.setRules(probe.rules.filter(r => !drop.has(r.id)));
+    for (const id of drop) hfSel.delete(id);
+    hfLastIdx = -1;
+    persistRules();
+    toastr.info(`보정 ${drop.size}개를 해제했어요.`);
 }
 
 // ------------------------------------------------------------------ AI analysis
@@ -1653,8 +1683,36 @@ async function initPanel() {
     });
     $root.on('click', 'button[data-hf]', function () {
         probe.removeRule(this.dataset.hf);
+        hfSel.delete(this.dataset.hf);
         persistRules();
         toastr.info('보정을 해제했어요.');
+    });
+    $root.on('click', 'input[data-hfsel]', function (ev) {
+        const idx = Number(this.dataset.idx);
+        const rules = probe.rules;
+        if (ev.shiftKey && hfLastIdx >= 0 && hfLastIdx !== idx) {
+            const [a, b] = idx < hfLastIdx ? [idx, hfLastIdx] : [hfLastIdx, idx];
+            for (let i = a; i <= b; i++) if (rules[i]) { if (this.checked) hfSel.add(rules[i].id); else hfSel.delete(rules[i].id); }
+        } else if (this.checked) hfSel.add(this.dataset.hfsel);
+        else hfSel.delete(this.dataset.hfsel);
+        hfLastIdx = idx;
+        renderHotfixList();
+    });
+    $root.on('click', 'button[data-hfbulk]', function () {
+        const rules = probe.rules;
+        switch (this.dataset.hfbulk) {
+            case 'all': rules.forEach(r => hfSel.add(r.id)); break;
+            case 'none': hfSel.clear(); hfLastIdx = -1; break;
+            case 'between': {
+                const idx = rules.map((r, i) => (hfSel.has(r.id) ? i : -1)).filter(i => i >= 0);
+                if (idx.length < 2) { toastr.info('시작과 끝, 두 개 이상을 먼저 체크해 주세요.'); return; }
+                for (let i = idx[0]; i <= idx[idx.length - 1]; i++) hfSel.add(rules[i].id);
+                break;
+            }
+            case 'removeSel': removeRulesBulk(rules.filter(r => hfSel.has(r.id)).map(r => r.id), '선택한'); return;
+            case 'removeAll': removeRulesBulk(rules.map(r => r.id), '전체'); return;
+        }
+        renderHotfixList();
     });
 }
 
