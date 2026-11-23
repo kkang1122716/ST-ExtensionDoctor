@@ -13,7 +13,7 @@ const libs = () => SillyTavern.libs || {};
 
 const DEFAULTS = {
     loopDetect: true,
-    rateThreshold: 30,
+    rateThreshold: 100,
     duration: 30,
     throttleMs: 200,
     debounceMs: 300,
@@ -36,6 +36,8 @@ function settings() {
     for (const [k, v] of Object.entries(DEFAULTS.ai)) if (s.ai[k] === undefined) s.ai[k] = v;
     // 1.3.1: default freeze threshold 1s -> 1.5s (only if the user never changed it)
     if (!s.freezeV2) { if (Number(s.freezeMs) === 1000) s.freezeMs = 1500; s.freezeV2 = true; }
+    // 1.4.2: default loop-rate threshold 30 -> 100 (only if the user never changed it)
+    if (!s.rateV2) { if (Number(s.rateThreshold) === 30) s.rateThreshold = 100; s.rateV2 = true; }
     // v1.0.0 default (4000) was too small for thinking models; lift it once.
     if (!s.ai.tokensV2) { if (Number(s.ai.maxTokens) === 4000) s.ai.maxTokens = 16000; s.ai.tokensV2 = true; }
     // Defensive: a key must never live in settings.json.
@@ -1608,7 +1610,7 @@ async function initPanel() {
     $root.on('click', '#xdoc_last_ai', showLastAi);
     $root.on('input', '#xdoc_duration', function () { s.duration = Number(this.value); $('#xdoc_duration_val').text(`${s.duration}초`); save(); });
     $root.on('change', '#xdoc_loop', function () { s.loopDetect = this.checked; probe.config.loopDetect = this.checked; save(); });
-    $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 30, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });
+    $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 100, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });
     $root.on('change', '#xdoc_toastsrc', function () { s.toastSource = this.checked; toastSourceOn = this.checked; save(); });
     $root.on('change', '#xdoc_freeze', function () { s.freezeAlert = this.checked; probe.config.freezeAlert = this.checked; save(); });
     $root.on('change', '#xdoc_freeze_sec', function () {

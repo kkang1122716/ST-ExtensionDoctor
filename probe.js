@@ -147,7 +147,7 @@ function install() {
     const pendingAlerts = [];
 
     const config = {
-        loopDetect: true, rateThreshold: 30, pingPongMin: 3, sustainSec: 3, cooldownMs: 5 * 60 * 1000,
+        loopDetect: true, rateThreshold: 100, pingPongMin: 3, sustainSec: 3, cooldownMs: 5 * 60 * 1000,
         freezeAlert: true, freezeMs: 1500, freezeQuietMs: 20000, // no freeze toasts during the first 20s (page load)
     };
 
