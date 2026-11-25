@@ -893,7 +893,17 @@ function storeHistory(list) {
     try { localStorage.setItem(HIST_KEY, JSON.stringify(list.slice(0, HIST_MAX))); } catch { /* storage full or blocked */ }
 }
 function storeLastReport(r) {
-    try { localStorage.setItem(LAST_KEY, JSON.stringify(r, (k, v) => (k === 'el' ? undefined : v))); } catch { /* too big or blocked: keep in memory only */ }
+    try { localStorage.setItem(LAST_KEY, JSON.stringify(r, (k, v) => (k === 'el' ? undefined : v))); return; } catch { /* too big? retry trimmed */ }
+    // Big setups (many extensions, huge selector lists) can exceed the storage quota: keep a trimmed copy so a reload doesn't lose it.
+    try {
+        localStorage.removeItem(LAST_KEY);
+        localStorage.setItem(LAST_KEY, JSON.stringify(r, (k, v) => {
+            if (k === 'el') return undefined;
+            if (Array.isArray(v) && v.length > 60) return v.slice(0, 60);
+            if (typeof v === 'string' && v.length > 600) return `${v.slice(0, 600)}…`;
+            return v;
+        }));
+    } catch { /* still too big or blocked: keep in memory only */ }
 }
 function loadLastReport() {
     try { const v = JSON.parse(localStorage.getItem(LAST_KEY) || 'null'); return v && Array.isArray(v.ranking) ? { ...v, restored: true } : null; } catch { return null; }
@@ -1347,25 +1357,101 @@ async function collectCode(r) {
         (r.domHandlers || []).filter(d => d.owner === owner && d.site).forEach(d => sites.unshift({ ...d.site, why: `${eventKo(d.type)} 반응 코드 등록 (${d.target}), ${fmtMs(d.dMs)}` }));
         r.intervals.filter(i => i.owner === owner && i.site).forEach(i => sites.push({ ...i.site, why: `setInterval ${i.delay}ms` }));
         r.scan?.issues.filter(i => i.ext === owner).forEach(i => sites.push({ url: location.origin + i.file, line: i.line, col: 1, why: i.msg }));
-        let budget = 150;
-        const parts = [];
-        const seen = new Set();
-        for (const s of sites) {
-            if (budget <= 0) break;
-            const path = new URL(s.url, location.origin).pathname;
-            const key = `${path}:${Math.round(s.line / 20)}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            let text;
-            try { text = await fetchText(path); } catch { continue; }
-            const radius = Math.max(5, Math.min(30, Math.floor(budget / 2) - 1));
-            const ex = excerpt(text, s.line, s.col, radius);
-            budget -= ex.lines;
-            parts.push({ file: shortFile(path), from: ex.from, to: ex.to, why: s.why, code: ex.code, lines: ex.lines });
-        }
+        const parts = await excerptSites(sites);
         if (parts.length) out.push({ owner, parts, lines: parts.reduce((a, p) => a + p.lines, 0) });
     }
     return out;
+}
+
+/** Turn code locations into excerpts, at most 150 lines in total for one extension. */
+async function excerptSites(sites) {
+    let budget = 150;
+    const parts = [];
+    const seen = new Set();
+    for (const s of sites) {
+        if (budget <= 0) break;
+        const path = new URL(s.url, location.origin).pathname;
+        const key = `${path}:${Math.round(s.line / 20)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        let text;
+        try { text = await fetchText(path); } catch { continue; }
+        // A pasted report may come from another version of the extension: skip lines that no longer exist.
+        if (!(s.line >= 1) || s.line > text.split('\n').length) continue;
+        const radius = Math.max(5, Math.min(30, Math.floor(budget / 2) - 1));
+        const ex = excerpt(text, s.line, s.col, radius);
+        budget -= ex.lines;
+        parts.push({ file: shortFile(path), from: ex.from, to: ex.to, why: s.why, code: ex.code, lines: ex.lines });
+    }
+    return parts;
+}
+
+/**
+ * Code excerpts for a report the user pasted back (e.g. after a reload lost the live one).
+ * Each "file.js:123" reference is attributed to the installed extension folder named closest before it on that line.
+ */
+async function collectCodeFromText(text) {
+    let list = [];
+    try { list = await discoverExtensions(); } catch { /* listing failed: no excerpts */ }
+    const folders = list.map(e => e.name).filter(n => n.startsWith('third-party/') && n !== probe.SELF).map(n => n.slice(12))
+        .sort((a, b) => b.length - a.length); // longer names first so "foo-bar" wins over "foo"
+    if (!folders.length) return [];
+    const isWordChar = ch => !!ch && /[\w-]/.test(ch);
+    const byOwner = new Map();
+    for (const raw of String(text).split(/\r?\n/)) {
+        const line = raw.length > 4000 ? raw.slice(0, 4000) : raw;
+        const refs = [...line.matchAll(/((?:[\w.@-]+\/)*[\w.@-]+\.m?js):(\d+)/g)];
+        if (!refs.length) continue;
+        const hits = []; // { folder, at }
+        for (const f of folders) {
+            let i = line.indexOf(f);
+            while (i >= 0) {
+                if (!isWordChar(line[i - 1]) && !isWordChar(line[i + f.length]) && !hits.some(h => i >= h.at && i < h.at + h.folder.length)) hits.push({ folder: f, at: i });
+                i = line.indexOf(f, i + f.length);
+            }
+        }
+        for (const m of refs) {
+            const before = hits.filter(h => h.at < m.index).sort((a, b) => b.at - a.at)[0];
+            if (!before) continue;
+            const owner = `third-party/${before.folder}`;
+            const file = m[1].replace(/^\/+/, '');
+            const why = line.replace(/^[\s\-*]+/, '').slice(0, 140);
+            if (!byOwner.has(owner)) byOwner.set(owner, []);
+            byOwner.get(owner).push({ url: `/scripts/extensions/${owner}/${file}`, line: Number(m[2]), col: 1, why });
+        }
+    }
+    const out = [];
+    for (const [owner, sites] of [...byOwner].slice(0, 6)) {
+        const parts = await excerptSites(sites);
+        if (parts.length) out.push({ owner, parts, lines: parts.reduce((a, p) => a + p.lines, 0) });
+    }
+    return out;
+}
+
+/** Pasted report text, with absurdly long lines (huge selector lists) shortened. */
+function tidyPastedReport(text) {
+    return String(text).split(/\r?\n/)
+        .map(l => (l.length > 700 ? `${l.slice(0, 700)} …(${fmtN(l.length - 700)}자 생략)` : l))
+        .join('\n').slice(0, 14000);
+}
+
+/** "Paste a copied report and analyse it": for when the live report is gone (reload, other device). */
+async function pasteReportForAi() {
+    if (aiRunning) { toastr.warning('AI 분석이 이미 진행 중이에요.'); if (aiLive && !aiLive.open) openLiveAi(); return; }
+    const { Popup, POPUP_TYPE, POPUP_RESULT } = ctx();
+    const el = document.createElement('div');
+    el.className = 'xdoc-fix';
+    el.innerHTML = `<h3>복사해 둔 리포트로 AI 분석</h3>
+      <p>[리포트 복사]로 복사해 둔 진단 리포트를 아래에 붙여넣으세요. 새로고침으로 리포트가 사라졌을 때 쓰면 돼요.</p>
+      <textarea class="text_pole xdoc-paste" rows="12" placeholder="[Extension Doctor 리포트] 진단 …"></textarea>
+      <div class="xdoc-muted">리포트에 적힌 "파일:줄" 위치를 보고, 지금 설치된 확장 코드에서 그 부분만 함께 보내요. 다음 화면에서 보낼 내용을 확인할 수 있어요.</div>`;
+    const ta = el.querySelector('textarea');
+    const res = await new Popup(el, POPUP_TYPE.CONFIRM, '', { okButton: '다음', cancelButton: '취소', wide: true, allowVerticalScrolling: true }).show();
+    if (res !== POPUP_RESULT.AFFIRMATIVE) return;
+    const text = ta.value.trim();
+    if (text.length < 40) { toastr.warning('붙여넣은 내용이 너무 짧아요. 리포트 전체를 붙여넣어 주세요.'); return; }
+    if (!/Extension Doctor|확장별 순위|멈춤|감시자/.test(text)) toastr.info('Extension Doctor 리포트가 아닌 것 같지만, 그대로 보내볼게요.');
+    runAiAnalysis({ pasted: text });
 }
 
 function aiDestination() {
@@ -1565,8 +1651,8 @@ async function runAiAnalysis(r) {
     if (aiRunning) { toastr.warning('AI 분석이 이미 진행 중이에요.'); if (aiLive && !aiLive.open) openLiveAi(); return; }
     const { Popup, POPUP_TYPE, POPUP_RESULT } = ctx();
     let code;
-    try { code = await collectCode(r); } catch (e) { code = []; console.error(e); }
-    const summary = reportToText(r).slice(0, 9000);
+    try { code = r.pasted ? await collectCodeFromText(r.pasted) : await collectCode(r); } catch (e) { code = []; console.error(e); }
+    const summary = r.pasted ? tidyPastedReport(r.pasted) : reportToText(r).slice(0, 9000);
     const codeText = code.map(c => `### ${ownerLabel(c.owner)}\n` + c.parts.map(p => `파일 ${p.file} (줄 ${p.from}–${p.to}) — ${p.why}\n\`\`\`js\n${p.code}\n\`\`\``).join('\n')).join('\n\n');
     // Secrets (keys/tokens in error messages or hard-coded in extension code) never leave the browser.
     const user = redactSecrets(`# 진단 리포트\n${summary}\n\n# 지목된 코드 발췌 (확장당 최대 150줄)\n${codeText || '(발췌 없음)'}`);
@@ -1576,7 +1662,7 @@ async function runAiAnalysis(r) {
     confirmEl.className = 'xdoc-fix';
     confirmEl.innerHTML = `<h3>AI 분석 — 보낼 내용 확인</h3>
       ${destinationPickerHtml()}
-      <ul><li>진단 리포트 요약 (텍스트 ${fmtN(summary.length)}자)</li>
+      <ul><li>${r.pasted ? '붙여넣은 진단 리포트' : '진단 리포트 요약'} (텍스트 ${fmtN(summary.length)}자)</li>
       ${code.map(c => `<li>${esc(ownerLabel(c.owner))} — 코드 ${c.lines}줄 (${esc(c.parts.map(p => `${p.file}:${p.from}-${p.to}`).join(', '))})</li>`).join('') || '<li>코드 발췌 없음</li>'}</ul>
       <p>대략 <b>${fmtN(approxTokens)} 토큰</b>을 보내요. 전체 파일은 보내지 않아요.</p>
       <div class="xdoc-muted">현재 채팅 연결이나 연결 프로필을 쓰면 그 API의 요금이 들어요.</div>`;
@@ -1685,6 +1771,7 @@ async function initPanel() {
     $root.on('click', '#xdoc_quick', () => showQuickReport(lastAlerts[0] || null));
     $root.on('click', '#xdoc_last_report', () => { if (lastReport) showReport(lastReport); else toastr.info('아직 진단 리포트가 없어요. [진단 시작]을 먼저 눌러 주세요.'); });
     $root.on('click', '#xdoc_last_ai', showLastAi);
+    $root.on('click', '#xdoc_paste_ai', pasteReportForAi);
     $root.on('input', '#xdoc_duration', function () { s.duration = Number(this.value); $('#xdoc_duration_val').text(`${s.duration}초`); save(); });
     $root.on('change', '#xdoc_loop', function () { s.loopDetect = this.checked; probe.config.loopDetect = this.checked; save(); });
     $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 100, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });

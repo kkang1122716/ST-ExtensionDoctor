@@ -21,6 +21,7 @@
 .xdoc-hf-check input { margin-top: 3px; flex: none; }
 .xdoc-hf-no { opacity: 0.6; flex: none; }
 .xdoc-danger { color: #ff8a80 !important; }
+.xdoc-paste { width: 100%; min-height: 220px; font-family: var(--monoFontFamily, monospace); font-size: 0.85em; resize: vertical; margin: 6px 0; }
 .xdoc-hf-persist { flex: none; font-size: 0.8em; padding: 1px 7px; border-radius: 10px; cursor: pointer; white-space: nowrap;
   background: transparent; color: inherit; opacity: 0.75; border: 1px dashed var(--SmartThemeBorderColor, #777); }
 .xdoc-hf-persist.on { opacity: 1; border-style: solid; border-color: var(--SmartThemeQuoteColor, #e18a24); }
