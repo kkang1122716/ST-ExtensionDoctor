@@ -14,11 +14,17 @@
 .xdoc-small:disabled { opacity: 0.45; cursor: default; }
 .xdoc-hf-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 4px; }
 .xdoc-hf-bar > span { margin-right: auto; }
-.xdoc-hf-list { max-height: 360px; overflow-y: auto; margin-top: 4px; border-top: 1px solid var(--SmartThemeBorderColor, #555); }
-.xdoc-hf-check { display: flex; align-items: flex-start; gap: 4px; flex: 1; min-width: 0; cursor: pointer; margin: 0; }
+.xdoc-hf-list { position: relative; max-height: 360px; overflow-y: auto; margin-top: 4px; border-top: 1px solid var(--SmartThemeBorderColor, #555); }
+.xdoc-hf-list .xdoc-hf { flex-wrap: wrap; border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #555) 40%, transparent); }
+.xdoc-hf-check { display: flex; align-items: flex-start; gap: 4px; flex: 1 1 180px; min-width: 0; cursor: pointer; margin: 0; overflow-wrap: anywhere; }
+.xdoc-hf-check + .xdoc-hf-persist { margin-left: auto; }
 .xdoc-hf-check input { margin-top: 3px; flex: none; }
 .xdoc-hf-no { opacity: 0.6; flex: none; }
 .xdoc-danger { color: #ff8a80 !important; }
+.xdoc-hf-persist { flex: none; font-size: 0.8em; padding: 1px 7px; border-radius: 10px; cursor: pointer; white-space: nowrap;
+  background: transparent; color: inherit; opacity: 0.75; border: 1px dashed var(--SmartThemeBorderColor, #777); }
+.xdoc-hf-persist.on { opacity: 1; border-style: solid; border-color: var(--SmartThemeQuoteColor, #e18a24); }
+.xdoc-hf-persist:hover { opacity: 1; }
 .xdoc-num { width: 6em !important; display: inline-block !important; margin: 0 4px !important; }
 
 /* toast */

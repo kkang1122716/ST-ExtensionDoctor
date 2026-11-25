@@ -1216,20 +1216,67 @@ async function renderHotfixList() {
     const ids = new Set(rules.map(r => r.id));
     for (const id of hfSel) if (!ids.has(id)) hfSel.delete(id);
     if (!rules.length) { box.innerHTML = '<div class="xdoc-muted">적용 중인 보정이 없어요.</div>'; return; }
-    const n = hfSel.size;
+    // Keep the list's scroll position across re-renders (removals, persist changes).
+    // Anchor on the first visible row rather than raw pixels: row heights can change on re-render.
+    let anchor = null;
+    const oldList = box.querySelector('.xdoc-hf-list');
+    if (oldList && oldList.scrollTop > 0) {
+        const rows = [...oldList.querySelectorAll('.xdoc-hf')];
+        const i = rows.findIndex(el => el.offsetTop + el.offsetHeight > oldList.scrollTop);
+        if (i >= 0) anchor = { i, id: rows[i].querySelector('[data-hf]')?.dataset.hf, delta: oldList.scrollTop - rows[i].offsetTop };
+    }
     box.innerHTML = `<div class="xdoc-hf-bar">
-        <span class="xdoc-muted">총 ${rules.length}개 · 선택 <b>${n}</b>개</span>
+        <span class="xdoc-muted">총 ${rules.length}개 (기억됨 ${rules.filter(r => r.persist).length}) · 선택 <b class="xdoc-hf-n">0</b>개</span>
         <button type="button" class="menu_button xdoc-small" data-hfbulk="all">전체 선택</button>
         <button type="button" class="menu_button xdoc-small" data-hfbulk="none">선택 비우기</button>
         <button type="button" class="menu_button xdoc-small" data-hfbulk="between" title="체크한 것 중 맨 위와 맨 아래 사이를 모두 선택해요">사이 모두 선택</button>
-        <button type="button" class="menu_button xdoc-small" data-hfbulk="removeSel" ${n ? '' : 'disabled'}>선택한 ${n}개 해제</button>
+      </div>
+      <div class="xdoc-hf-bar">
+        <span class="xdoc-muted">선택한 것을:</span>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="persistSel" data-needsel title="새로고침해도 계속 적용돼요">기억하기로</button>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="onceSel" data-needsel title="새로고침하면 해제돼요">이번만으로</button>
+        <button type="button" class="menu_button xdoc-small" data-hfbulk="removeSel" data-needsel>해제</button>
         <button type="button" class="menu_button xdoc-small xdoc-danger" data-hfbulk="removeAll">전체 해제</button>
       </div>
-      <small class="xdoc-muted">범위 선택: 시작과 끝을 체크하고 "사이 모두 선택"을 누르거나, PC에서는 Shift를 누른 채 끝을 클릭하세요.</small>
+      <small class="xdoc-muted">범위 선택: 시작과 끝을 체크하고 "사이 모두 선택"을 누르거나, PC에서는 Shift를 누른 채 끝을 클릭하세요. 줄의 (기억됨)/(이번만)을 누르면 서로 바뀌어요.</small>
       <div class="xdoc-hf-list">${rules.map((r, i) => `<div class="xdoc-hf">
-        <label class="xdoc-hf-check"><input type="checkbox" data-hfsel="${esc(r.id)}" data-idx="${i}" ${hfSel.has(r.id) ? 'checked' : ''}>
-        <span class="xdoc-hf-no">${i + 1}.</span> <span>${esc(ruleLabel(r))} <span class="xdoc-muted">${r.persist ? '(기억됨)' : '(이번만)'}</span></span></label>
+        <label class="xdoc-hf-check"><input type="checkbox" data-hfsel="${esc(r.id)}" data-idx="${i}">
+        <span class="xdoc-hf-no">${i + 1}.</span> <span>${esc(ruleLabel(r))}</span></label>
+        <button type="button" class="xdoc-hf-persist ${r.persist ? 'on' : ''}" data-hfpersist="${esc(r.id)}" title="눌러서 ${r.persist ? '이번만으로' : '기억하기로'} 바꾸기">${r.persist ? '기억됨' : '이번만'}</button>
         <button type="button" class="menu_button xdoc-small" data-hf="${esc(r.id)}">해제</button></div>`).join('')}</div>`;
+    const list = box.querySelector('.xdoc-hf-list');
+    if (list && anchor) {
+        const rows = [...list.querySelectorAll('.xdoc-hf')];
+        const row = rows.find(el => el.querySelector('[data-hf]')?.dataset.hf === anchor.id) || rows[Math.min(anchor.i, rows.length - 1)];
+        if (row) list.scrollTop = row.offsetTop + anchor.delta;
+    }
+    syncHfSel();
+}
+
+/** Reflect the selection set in the existing DOM without re-rendering (keeps scroll position). */
+function syncHfSel() {
+    const box = document.getElementById('xdoc_hotfix_list');
+    if (!box) return;
+    box.querySelectorAll('input[data-hfsel]').forEach(cb => { cb.checked = hfSel.has(cb.dataset.hfsel); });
+    const n = hfSel.size;
+    const nEl = box.querySelector('.xdoc-hf-n');
+    if (nEl) nEl.textContent = String(n);
+    box.querySelectorAll('[data-needsel]').forEach(b => { b.disabled = !n; });
+    const rm = box.querySelector('[data-hfbulk="removeSel"]');
+    if (rm) rm.textContent = n ? `${n}개 해제` : '해제';
+}
+
+/** Switch rules between "this session only" and "remembered". */
+function setRulesPersist(idList, persist) {
+    const ids = new Set(idList);
+    let n = 0;
+    probe.setRules(probe.rules.map(r => {
+        if (!ids.has(r.id) || !!r.persist === persist) return r;
+        n++;
+        return { ...r, persist };
+    }));
+    persistRules();
+    return n;
 }
 
 const hfSel = new Set();
@@ -1696,7 +1743,13 @@ async function initPanel() {
         } else if (this.checked) hfSel.add(this.dataset.hfsel);
         else hfSel.delete(this.dataset.hfsel);
         hfLastIdx = idx;
-        renderHotfixList();
+        syncHfSel();
+    });
+    $root.on('click', 'button[data-hfpersist]', function () {
+        const r = probe.rules.find(x => x.id === this.dataset.hfpersist);
+        if (!r) return;
+        setRulesPersist([r.id], !r.persist);
+        toastr.info(r.persist ? '이번만 적용으로 바꿨어요. (새로고침하면 해제)' : '기억하기로 바꿨어요. (새로고침해도 유지)');
     });
     $root.on('click', 'button[data-hfbulk]', function () {
         const rules = probe.rules;
@@ -1711,8 +1764,15 @@ async function initPanel() {
             }
             case 'removeSel': removeRulesBulk(rules.filter(r => hfSel.has(r.id)).map(r => r.id), '선택한'); return;
             case 'removeAll': removeRulesBulk(rules.map(r => r.id), '전체'); return;
+            case 'persistSel':
+            case 'onceSel': {
+                const toPersist = this.dataset.hfbulk === 'persistSel';
+                const n = setRulesPersist([...hfSel], toPersist);
+                toastr.info(n ? `보정 ${n}개를 ${toPersist ? '기억하기로' : '이번만으로'} 바꿨어요.` : `선택한 보정은 이미 모두 ${toPersist ? '기억됨' : '이번만'}이에요.`);
+                return;
+            }
         }
-        renderHotfixList();
+        syncHfSel();
     });
 }
 
