@@ -20,6 +20,7 @@ const DEFAULTS = {
     freezeAlert: true,
     freezeMs: 1500,
     toastSource: true,
+    extSearch: true,
     ai: { mode: 'current', profileId: '', profileModel: '', directUrl: '', directModel: '', rememberKey: false, maxTokens: 16000, timeoutSec: 180 },
     hotfixes: [],
 };
@@ -1737,6 +1738,99 @@ function showAiMode() {
     if (mode === 'profile') refreshProfiles();
 }
 
+// ------------------------------------------------------------------ extension list search
+
+const XS = 'xdoc_ext_search';
+let xsObserver = null;
+const normQ = v => String(v || '').toLowerCase().replace(/\s+/g, '');
+
+/** Every settings block in the two extension columns (ST's placeholder containers are looked into). */
+function xsUnits() {
+    const units = [];
+    for (const id of ['extensions_settings', 'extensions_settings2']) {
+        const col = document.getElementById(id);
+        if (!col) continue;
+        for (const child of col.children) {
+            if (child.classList.contains('extension_container')) for (const sub of child.children) units.push({ el: sub, owner: null });
+            else units.push({ el: child, owner: probe?.panelOwners?.get(child) || null });
+        }
+    }
+    return units;
+}
+
+function xsTitle(el) {
+    const h = el.querySelector('.inline-drawer-header, .inline-drawer-toggle, h3, h4');
+    // No header: use only the start of the block's text, so a name search doesn't hit deep settings text.
+    return h ? h.textContent.replace(/\s+/g, ' ').trim().slice(0, 200) : (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+function applyExtSearch() {
+    const input = document.getElementById(`${XS}_q`);
+    if (!input) return;
+    const q = normQ(input.value);
+    const deep = !!document.getElementById(`${XS}_deep`)?.checked;
+    let shown = 0;
+    let total = 0;
+    let only = null;
+    for (const u of xsUnits()) {
+        const title = xsTitle(u.el);
+        if (!title) { u.el.classList.remove('xdoc-xs-hide'); continue; } // empty placeholder
+        total++;
+        const owner = u.owner && probe.isExtOwner(u.owner) ? `${ownerLabel(u.owner)} ${u.owner}` : '';
+        const hay = normQ(`${title} ${owner}`) + (deep ? normQ(u.el.textContent) : '');
+        const hit = !q || hay.includes(q);
+        u.el.classList.toggle('xdoc-xs-hide', !hit);
+        if (hit) { shown++; only = u.el; }
+    }
+    const n = document.getElementById(`${XS}_n`);
+    if (n) n.textContent = q ? `${shown} / ${total}개` : '';
+    return q && shown === 1 ? only : null;
+}
+
+function mountExtSearch() {
+    if (document.getElementById(XS)) return;
+    const head = document.querySelector('#rm_extensions_block .extensions_block > .flex-container');
+    if (!head) return;
+    const bar = document.createElement('div');
+    bar.id = XS;
+    bar.className = 'xdoc-ext-search wide100p';
+    bar.innerHTML = `<i class="fa-solid fa-magnifying-glass"></i>
+        <input type="search" id="${XS}_q" class="text_pole" placeholder="확장 검색 (이름·폴더 이름)" autocomplete="off" spellcheck="false">
+        <label class="checkbox_label" title="확장 이름뿐 아니라 설정 화면 안의 글자까지 찾아요"><input type="checkbox" id="${XS}_deep"> 설정 내용까지</label>
+        <small id="${XS}_n" class="xdoc-muted"></small>`;
+    head.after(bar);
+    const input = bar.querySelector('input[type="search"]');
+    const owners = () => xsUnits().map(u => u.owner).filter(o => o && probe.isExtOwner(o));
+    input.addEventListener('focus', () => { ensureNames(owners()).then(applyExtSearch); });
+    input.addEventListener('input', applyExtSearch);
+    bar.querySelector(`#${XS}_deep`).addEventListener('change', applyExtSearch);
+    input.addEventListener('keydown', ev => {
+        if (ev.key === 'Escape') { input.value = ''; applyExtSearch(); }
+        if (ev.key === 'Enter') {
+            // One match left: open it and bring it into view.
+            const el = applyExtSearch();
+            if (!el) return;
+            const drawer = el.matches('.inline-drawer') ? el : el.querySelector('.inline-drawer');
+            const content = drawer?.querySelector(':scope > .inline-drawer-content');
+            if (content && getComputedStyle(content).display === 'none') drawer.querySelector(':scope > .inline-drawer-toggle')?.click();
+            el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+    });
+    // Extensions that add their panel late: re-filter (only direct children, cheap).
+    xsObserver = new MutationObserver(() => { if (input.value) applyExtSearch(); });
+    for (const id of ['extensions_settings', 'extensions_settings2']) {
+        const col = document.getElementById(id);
+        if (col) xsObserver.observe(col, { childList: true });
+    }
+}
+
+function unmountExtSearch() {
+    xsObserver?.disconnect();
+    xsObserver = null;
+    document.getElementById(XS)?.remove();
+    document.querySelectorAll('.xdoc-xs-hide').forEach(el => el.classList.remove('xdoc-xs-hide'));
+}
+
 async function initPanel() {
     const html = await ctx().renderExtensionTemplateAsync(EXT_PATH, 'settings');
     const target = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
@@ -1750,6 +1844,8 @@ async function initPanel() {
     $('#xdoc_threshold').val(s.rateThreshold);
     $('#xdoc_freeze').prop('checked', s.freezeAlert);
     $('#xdoc_toastsrc').prop('checked', s.toastSource);
+    $('#xdoc_extsearch').prop('checked', s.extSearch);
+    if (s.extSearch) mountExtSearch();
     $('#xdoc_freeze_sec').val((s.freezeMs / 1000).toFixed(1));
     if (!lastReport) lastReport = loadLastReport();
     renderHistoryInfo();
@@ -1776,6 +1872,7 @@ async function initPanel() {
     $root.on('change', '#xdoc_loop', function () { s.loopDetect = this.checked; probe.config.loopDetect = this.checked; save(); });
     $root.on('change', '#xdoc_threshold', function () { s.rateThreshold = clamp(Number(this.value) || 100, 5, 1000); this.value = s.rateThreshold; probe.config.rateThreshold = s.rateThreshold; save(); });
     $root.on('change', '#xdoc_toastsrc', function () { s.toastSource = this.checked; toastSourceOn = this.checked; save(); });
+    $root.on('change', '#xdoc_extsearch', function () { s.extSearch = this.checked; if (this.checked) mountExtSearch(); else unmountExtSearch(); save(); });
     $root.on('change', '#xdoc_freeze', function () { s.freezeAlert = this.checked; probe.config.freezeAlert = this.checked; save(); });
     $root.on('change', '#xdoc_freeze_sec', function () {
         const sec = clamp(Number(this.value) || 1, 0.3, 10);

@@ -21,6 +21,10 @@
 .xdoc-hf-check input { margin-top: 3px; flex: none; }
 .xdoc-hf-no { opacity: 0.6; flex: none; }
 .xdoc-danger { color: #ff8a80 !important; }
+.xdoc-xs-hide { display: none !important; }
+.xdoc-ext-search { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0 4px; }
+.xdoc-ext-search input[type="search"] { flex: 1 1 200px; min-width: 0; margin: 0; }
+.xdoc-ext-search .checkbox_label { margin: 0; white-space: nowrap; }
 .xdoc-paste { width: 100%; min-height: 220px; font-family: var(--monoFontFamily, monospace); font-size: 0.85em; resize: vertical; margin: 6px 0; }
 .xdoc-hf-persist { flex: none; font-size: 0.8em; padding: 1px 7px; border-radius: 10px; cursor: pointer; white-space: nowrap;
   background: transparent; color: inherit; opacity: 0.75; border: 1px dashed var(--SmartThemeBorderColor, #777); }
